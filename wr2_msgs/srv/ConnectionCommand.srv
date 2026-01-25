@@ -1,0 +1,13 @@
+# This service exists to allow the user to hack into drivers at a connection level
+# Used by the comms debugger to override whatever the sensor driver is doing
+
+uint8 command_type
+
+uint8 UNKNOWN=0
+uint8 START=1
+uint8 STOP=2
+uint8 SEND_BREAK=3
+
+---
+bool success
+string message
