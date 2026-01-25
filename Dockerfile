@@ -2,7 +2,14 @@ FROM docker.io/library/ros:humble@sha256:2fe6fec19fbac9c94794c7fa4afc83099f53726
 
 COPY wr2_msgs/ /app/src/wr2_msgs/
 
+
 RUN bash -c " \
     source /opt/ros/${ROS_DISTRO}/setup.bash && \
     cd /app && \
-    colcon build --cmake-args -DBUILD_TESTING=OFF --packages-select wr2_msgs"
+    colcon build \
+        --event-handlers console_direct+ \
+        --cmake-args \
+            -DCMAKE_FIND_DEBUG_MODE=ON \
+            -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DBUILD_TESTING=OFF \
+        --packages-select wr2_msgs"
