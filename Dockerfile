@@ -9,11 +9,4 @@ RUN cat > /tmp/inject.sed << 'EOF'
 EOF
 RUN sed -i -f /tmp/inject.sed /opt/ros/humble/share/rcutils/cmake/ament_cmake_export_libraries-extras.cmake
 
-RUN mkdir -p /app/build/wr2_msgs && \
-    cd /app/build/wr2_msgs && \
-    . /opt/ros/humble/setup.sh && \
-    cmake /app/src/wr2_msgs \
-        -DCMAKE_PREFIX_PATH=/opt/ros/humble \
-        -DCMAKE_VERBOSE_MAKEFILE=ON \
-        -DBUILD_TESTING=OFF \
-        -DCMAKE_INSTALL_PREFIX=/app/install/wr2_msgs
+WORKDIR /app
