@@ -55,7 +55,7 @@ jobs:
           sleep 5
 
           # Find the sleep process on the host
-          SLEEP_PID=$(pgrep -f "sleep 120" | head -1)
+          SLEEP_PID=$(pgrep -f "/usr/bin/qemu-aarch64 /usr/bin/sleep")
           echo "Sleep PID: $SLEEP_PID"
 
           if [ -z "$SLEEP_PID" ]; then
