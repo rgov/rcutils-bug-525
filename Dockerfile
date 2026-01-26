@@ -9,18 +9,12 @@ RUN cat > /tmp/inject.sed << 'EOF'
 EOF
 RUN sed -i -f /tmp/inject.sed /opt/ros/humble/share/rcutils/cmake/ament_cmake_export_libraries-extras.cmake
 
-RUN bash -c " \
-    source /opt/ros/${ROS_DISTRO}/setup.bash && \
-    cd /app && \
-    colcon build \
-        --event-handlers console_direct+ \
-        --cmake-args \
-            -DCMAKE_FIND_DEBUG_MODE=ON \
-            -DCMAKE_VERBOSE_MAKEFILE=ON \
-            -DBUILD_TESTING=OFF \
-        --packages-select wr2_msgs \
-        --cmake-target help; \
-    EXIT_CODE=\$?; \
-    echo '=== CMakeCache.txt ===' && \
-    cat /app/build/wr2_msgs/CMakeCache.txt 2>/dev/null || echo 'CMakeCache.txt not found'; \
-    exit \$EXIT_CODE"
+RUN mkdir -p /app/build/wr2_msgs && \
+    cd /app/build/wr2_msgs && \
+    . /opt/ros/humble/setup.sh && \
+    cmake /app/src/wr2_msgs \
+        -DCMAKE_PREFIX_PATH=/opt/ros/humble \
+        -DCMAKE_FIND_DEBUG_MODE=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
+        -DBUILD_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/app/install/wr2_msgs
