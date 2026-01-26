@@ -9,7 +9,11 @@ RUN bash -c " \
     colcon build \
         --event-handlers console_direct+ \
         --cmake-args \
+            --trace-expand \
             -DCMAKE_FIND_DEBUG_MODE=ON \
-            -DCMAKE_VERBOSE_MAKEFILE=ON \
             -DBUILD_TESTING=OFF \
-        --packages-select wr2_msgs"
+        --packages-select wr2_msgs; \
+    EXIT_CODE=\$?; \
+    echo '=== CMakeCache.txt ===' && \
+    cat /app/build/wr2_msgs/CMakeCache.txt 2>/dev/null || echo 'CMakeCache.txt not found'; \
+    exit \$EXIT_CODE"
