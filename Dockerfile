@@ -14,7 +14,6 @@ RUN mkdir -p /app/build/wr2_msgs && \
     . /opt/ros/humble/setup.sh && \
     cmake /app/src/wr2_msgs \
         -DCMAKE_PREFIX_PATH=/opt/ros/humble \
-        -DCMAKE_FIND_DEBUG_MODE=ON \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DBUILD_TESTING=OFF \
         -DCMAKE_INSTALL_PREFIX=/app/install/wr2_msgs
