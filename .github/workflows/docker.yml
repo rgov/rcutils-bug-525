@@ -28,12 +28,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Install strace
+        run: sudo apt-get update && sudo apt-get install -y strace
+
       - name: Run cmake build
         run: |
-          docker run --rm -v ${{ github.workspace }}/artifacts:/app/artifacts testcontainer bash -c '
+          mkdir -p ${{ github.workspace }}/artifacts
+
+          # Start container detached
+          docker run -d --name cmake-build -v ${{ github.workspace }}/artifacts:/app/artifacts testcontainer bash -c '
             mkdir -p /app/build/wr2_msgs /app/artifacts
             cd /app/build/wr2_msgs
             . /opt/ros/humble/setup.sh
+            sleep 120
             cmake /app/src/wr2_msgs \
                 -DCMAKE_PREFIX_PATH=/opt/ros/humble \
                 -DCMAKE_VERBOSE_MAKEFILE=ON \
@@ -43,6 +50,50 @@ jobs:
             echo "BUILD_EXIT_CODE=$BUILD_EXIT_CODE" > /app/artifacts/build_status.txt
             exit $BUILD_EXIT_CODE
           '
+
+          # Wait for container to start and sleep to begin
+          sleep 5
+
+          # Find the sleep process on the host
+          SLEEP_PID=$(pgrep -f "sleep 120" | head -1)
+          echo "Sleep PID: $SLEEP_PID"
+
+          if [ -z "$SLEEP_PID" ]; then
+            echo "Could not find sleep process"
+            docker logs cmake-build
+            docker rm -f cmake-build
+            exit 1
+          fi
+
+          # Get parent PID (bash process running cmake)
+          PARENT_PID=$(ps -o ppid= -p $SLEEP_PID | tr -d ' ')
+          echo "Parent PID: $PARENT_PID"
+
+          # Debug: show process tree
+          ps auxf | grep -E "(sleep|bash|qemu)" | head -20 || true
+
+          # Start strace on parent, following forks
+          sudo strace -ff -o ${{ github.workspace }}/artifacts/strace -p $PARENT_PID &
+          STRACE_PID=$!
+
+          # Give strace time to attach
+          sleep 2
+
+          # Kill sleep so cmake starts
+          sudo kill $SLEEP_PID
+
+          # Follow container logs in background
+          docker logs -f cmake-build &
+
+          # Wait for container to exit and get status
+          DOCKER_EXIT=$(docker wait cmake-build)
+          echo "Container exited with: $DOCKER_EXIT"
+
+          # Cleanup
+          sudo kill $STRACE_PID 2>/dev/null || true
+          docker rm cmake-build 2>/dev/null || true
+
+          exit $DOCKER_EXIT
 
       - name: Upload artifacts
         if: always()
