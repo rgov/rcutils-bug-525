@@ -73,7 +73,7 @@ jobs:
           ps auxf | grep -E "(sleep|bash|qemu)" | head -20 || true
 
           # Start strace on parent, following forks
-          sudo strace -ff -o ${{ github.workspace }}/artifacts/strace -p $PARENT_PID &
+          sudo strace -ff -x -s 4096 -e trace=mmap,getdents64,munmap,write,close,faccessat,access,stat -o ${{ github.workspace }}/artifacts/strace -p $PARENT_PID &
           STRACE_PID=$!
 
           # Give strace time to attach
