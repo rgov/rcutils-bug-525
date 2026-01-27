@@ -103,11 +103,12 @@ jobs:
             --env QEMU_LOG='strace,page,tid' \
             --env QEMU_TRACE='enable=translate_block,enable=exec_tb_*' \
             --env QEMU_LOG_FILENAME='/app/artifacts/qemu-%d.log' \
+            --privileged \
             testcontainer bash -c '
             mkdir -p /app/build/wr2_msgs /app/artifacts
             cd /app/build/wr2_msgs
             . /opt/ros/humble/setup.sh
-            cmake /app/src/wr2_msgs \
+            setarch -R cmake /app/src/wr2_msgs \
                 -DCMAKE_PREFIX_PATH=/opt/ros/humble \
                 -DCMAKE_VERBOSE_MAKEFILE=ON \
                 -DBUILD_TESTING=OFF \
