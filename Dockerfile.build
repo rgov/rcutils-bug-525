@@ -1,4 +1,5 @@
-# Build CMake from Ubuntu source in ros:humble container
+# Build CMake from Ubuntu source - optimized for incremental rebuilds
+# Matches Debian build flags exactly, with separate debug symbols
 FROM ros:humble
 
 # Enable source repositories and install build dependencies
@@ -11,30 +12,59 @@ RUN sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list && \
 WORKDIR /src
 RUN apt-get source cmake
 
-# Optional: Copy custom patches
-# Uncomment and modify if you have patches to apply
-# COPY patches/ /tmp/patches/
-# RUN cd /src/cmake-* && \
-#     for patch in /tmp/patches/*.patch; do \
-#         [ -f "$patch" ] && cp "$patch" debian/patches/ && \
-#         echo "$(basename $patch)" >> debian/patches/series; \
-#     done && \
-#     quilt push -a || true
-
 # Add -custom suffix to version string
 RUN cd /src/cmake-* && \
     sed -i '/set(CMake_VERSION_PATCH/a set(CMake_VERSION_SUFFIX "-custom")' Source/CMakeVersion.cmake && \
-    sed -i 's/\${CMake_VERSION_MAJOR}\.\${CMake_VERSION_MINOR}\.\${CMake_VERSION_PATCH}/&${CMake_VERSION_SUFFIX}/' Source/CMakeVersion.cmake && \
-    cat Source/CMakeVersion.cmake
+    sed -i 's/\${CMake_VERSION_MAJOR}\.\${CMake_VERSION_MINOR}\.\${CMake_VERSION_PATCH}/&${CMake_VERSION_SUFFIX}/' Source/CMakeVersion.cmake
 
-# Build the package
-RUN cd /src/cmake-* && DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b -j$(nproc)
+# Configure using exact Debian flags (from dpkg-buildflags)
+RUN cd /src/cmake-* && \
+    mkdir -p Build && \
+    cd Build && \
+    export CFLAGS="-g -O2 -ffile-prefix-map=/src/cmake-3.22.1=. -flto=auto -ffat-lto-objects -fstack-protector-strong -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2" && \
+    export CXXFLAGS="-g -O2 -ffile-prefix-map=/src/cmake-3.22.1=. -flto=auto -ffat-lto-objects -fstack-protector-strong -Wformat -Werror=format-security -Wdate-time -D_FORTIFY_SOURCE=2" && \
+    export LDFLAGS="-Wl,-Bsymbolic-functions -flto=auto -ffat-lto-objects -Wl,-z,relro -Wl,--as-needed" && \
+    cmake .. \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_SKIP_RPATH=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
+        -DCMAKE_C_FLAGS="$CFLAGS" \
+        -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
+        -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" \
+        -DCMAKE_SHARED_LINKER_FLAGS="$LDFLAGS" \
+        -DCMAKE_USE_SYSTEM_LIBRARIES=ON \
+        -DBUILD_TESTING=OFF
 
-# Install the built .deb files and debug symbols
-RUN dpkg -i /src/cmake_*.deb /src/cmake-data_*.deb /src/*.ddeb \
-    || apt-get install -f -y
+# Full build (cached layer)
+RUN cd /src/cmake-*/Build && make -j$(nproc)
+
+# Install, strip binaries, extract debug symbols (like dh_strip does)
+RUN cd /src/cmake-*/Build && make install && \
+    mkdir -p /usr/lib/debug/usr/bin && \
+    for bin in /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/bin/ccmake; do \
+        if [ -f "$bin" ]; then \
+            objcopy --only-keep-debug "$bin" "/usr/lib/debug${bin}.debug" && \
+            strip --strip-unneeded "$bin" && \
+            objcopy --add-gnu-debuglink="/usr/lib/debug${bin}.debug" "$bin"; \
+        fi; \
+    done
+
+# === ADD COPY STEPS HERE TO OVERRIDE SOURCE FILES ===
+# Example: COPY my-modified-file.cxx /src/cmake-3.22.1/Source/cmGlobalGenerator.cxx
+
+# Incremental rebuild (will only rebuild changed files)
+RUN cd /src/cmake-*/Build && make -j$(nproc) && make install && \
+    mkdir -p /usr/lib/debug/usr/bin && \
+    for bin in /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/bin/ccmake; do \
+        if [ -f "$bin" ]; then \
+            objcopy --only-keep-debug "$bin" "/usr/lib/debug${bin}.debug" && \
+            strip --strip-unneeded "$bin" && \
+            objcopy --add-gnu-debuglink="/usr/lib/debug${bin}.debug" "$bin"; \
+        fi; \
+    done
 
 # Verify installation
-RUN cmake --version
+RUN cmake --version && file /usr/bin/cmake
 
+WORKDIR /src/cmake-3.22.1
 CMD ["bash"]
