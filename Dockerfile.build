@@ -30,8 +30,9 @@ RUN cd /src/cmake-* && \
 # Build the package
 RUN cd /src/cmake-* && DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b -j$(nproc)
 
-# Install the built .deb files
-RUN dpkg -i /src/cmake_*.deb /src/cmake-data_*.deb || apt-get install -f -y
+# Install the built .deb files and debug symbols
+RUN dpkg -i /src/cmake_*.deb /src/cmake-data_*.deb /src/*.ddeb \
+    || apt-get install -f -y
 
 # Verify installation
 RUN cmake --version
