@@ -23,11 +23,12 @@ RUN apt-get source cmake
 
 # Add -custom suffix to version string
 RUN cd /src/cmake-* && \
-    sed -i 's/set(CMake_VERSION_SUFFIX.*/set(CMake_VERSION_SUFFIX "-custom")/' Source/CMakeVersion.cmake && \
+    sed -i '/set(CMake_VERSION_PATCH/a set(CMake_VERSION_SUFFIX "-custom")' Source/CMakeVersion.cmake && \
+    sed -i 's/\${CMake_VERSION_MAJOR}\.\${CMake_VERSION_MINOR}\.\${CMake_VERSION_PATCH}/&${CMake_VERSION_SUFFIX}/' Source/CMakeVersion.cmake && \
     cat Source/CMakeVersion.cmake
 
 # Build the package
-RUN cd /src/cmake-* && dpkg-buildpackage -us -uc -b -j$(nproc)
+RUN cd /src/cmake-* && DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b -j$(nproc)
 
 # Install the built .deb files
 RUN dpkg -i /src/cmake_*.deb /src/cmake-data_*.deb || apt-get install -f -y
