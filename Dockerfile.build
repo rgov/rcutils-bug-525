@@ -1,0 +1,38 @@
+# Build CMake from Ubuntu source in ros:humble container
+FROM ros:humble
+
+# Enable source repositories and install build dependencies
+RUN sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get build-dep -y cmake && \
+    apt-get install -y quilt
+
+# Fetch Ubuntu's CMake source package
+WORKDIR /src
+RUN apt-get source cmake
+
+# Optional: Copy custom patches
+# Uncomment and modify if you have patches to apply
+# COPY patches/ /tmp/patches/
+# RUN cd /src/cmake-* && \
+#     for patch in /tmp/patches/*.patch; do \
+#         [ -f "$patch" ] && cp "$patch" debian/patches/ && \
+#         echo "$(basename $patch)" >> debian/patches/series; \
+#     done && \
+#     quilt push -a || true
+
+# Add -custom suffix to version string
+RUN cd /src/cmake-* && \
+    sed -i 's/set(CMake_VERSION_SUFFIX.*/set(CMake_VERSION_SUFFIX "-custom")/' Source/CMakeVersion.cmake && \
+    cat Source/CMakeVersion.cmake
+
+# Build the package
+RUN cd /src/cmake-* && dpkg-buildpackage -us -uc -b -j$(nproc)
+
+# Install the built .deb files
+RUN dpkg -i /src/cmake_*.deb /src/cmake-data_*.deb || apt-get install -f -y
+
+# Verify installation
+RUN cmake --version
+
+CMD ["bash"]

@@ -28,6 +28,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build custom cmake image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.build
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: testcontainer-custom-cmake
+          cache-from: type=gha,scope=custom-cmake
+          cache-to: type=gha,mode=max,scope=custom-cmake
+
       - name: Install host packages
         run: sudo apt-get update && sudo apt-get install -y strace gdb-multiarch
 
@@ -96,8 +108,13 @@ jobs:
 
           exit $DOCKER_EXIT
 
+      - name: Print cmake version
+        if: always()
+        run: |
+          docker run --rm testcontainer-custom-cmake cmake --version
+
       - name: Run cmake build with QEMU tracing
-        if: ${{ false }}
+        if: always()
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
           #dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
@@ -109,7 +126,7 @@ jobs:
             --env QEMU_TRACE='enable=translate_block,enable=exec_tb_*' \
             --env QEMU_LOG_FILENAME='/app/artifacts/qemu-%d.log' \
             --privileged \
-            testcontainer bash -c '
+            testcontainer-custom-cmake bash -c '
             mkdir -p /app/build/wr2_msgs /app/artifacts
             cd /app/build/wr2_msgs
             . /opt/ros/humble/setup.sh
@@ -124,7 +141,7 @@ jobs:
           '
 
       - name: Run cmake build with GDB
-        if: always()
+        if: ${{ false }}
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
 
