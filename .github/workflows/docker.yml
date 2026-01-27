@@ -99,7 +99,12 @@ jobs:
       - name: Run cmake build with QEMU tracing
         if: always()
         run: |
-          docker run --name cmake-build -v ${{ github.workspace }}/artifacts:/app/artifacts \
+          mkdir -p ${{ github.workspace }}/artifacts
+          dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
+
+          docker run --name cmake-build \
+            -v ${{ github.workspace }}/artifacts:/app/artifacts \
+            -v ${{ github.workspace }}/artifacts/fake_urandom:/dev/urandom:ro \
             --env QEMU_LOG='strace,page,tid' \
             --env QEMU_TRACE='enable=translate_block,enable=exec_tb_*' \
             --env QEMU_LOG_FILENAME='/app/artifacts/qemu-%d.log' \
