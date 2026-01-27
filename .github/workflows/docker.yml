@@ -31,7 +31,8 @@ jobs:
       - name: Install strace
         run: sudo apt-get update && sudo apt-get install -y strace
 
-      - name: Run cmake build
+      - name: Run cmake build under strace
+        if: ${{ false }}  # what the fuck is the syntax, GitHub
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
 
@@ -94,6 +95,27 @@ jobs:
           docker rm cmake-build 2>/dev/null || true
 
           exit $DOCKER_EXIT
+
+      - name: Run cmake build with QEMU tracing
+        if: always()
+        run: |
+          docker run --name cmake-build -v ${{ github.workspace }}/artifacts:/app/artifacts \
+            --env QEMU_LOG=syscall,page \
+            --env QEMU_TRACE='exec_tb_*,translate_block' \
+            --env QEMU_LOG_FILENAME=/app/artifacts/qemu.log \
+            testcontainer bash -c '
+            mkdir -p /app/build/wr2_msgs /app/artifacts
+            cd /app/build/wr2_msgs
+            . /opt/ros/humble/setup.sh
+            cmake /app/src/wr2_msgs \
+                -DCMAKE_PREFIX_PATH=/opt/ros/humble \
+                -DCMAKE_VERBOSE_MAKEFILE=ON \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_INSTALL_PREFIX=/app/install/wr2_msgs
+            BUILD_EXIT_CODE=$?
+            echo "BUILD_EXIT_CODE=$BUILD_EXIT_CODE" > /app/artifacts/build_status.txt
+            exit $BUILD_EXIT_CODE
+          '
 
       - name: Upload artifacts
         if: always()
