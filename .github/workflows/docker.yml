@@ -97,7 +97,7 @@ jobs:
           exit $DOCKER_EXIT
 
       - name: Run cmake build with QEMU tracing
-        if: always()
+        if: ${{ false }}
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
           #dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
@@ -122,6 +122,72 @@ jobs:
             echo "BUILD_EXIT_CODE=$BUILD_EXIT_CODE" > /app/artifacts/build_status.txt
             exit $BUILD_EXIT_CODE
           '
+
+      - name: Run cmake build with GDB
+        if: always()
+        run: |
+          mkdir -p ${{ github.workspace }}/artifacts
+
+          # Install GDB for multiarch debugging
+          sudo apt-get update && sudo apt-get install -y gdb-multiarch
+
+          # Start container in background with QEMU waiting for GDB connection
+          docker run -d --name cmake-build \
+            -v ${{ github.workspace }}/artifacts:/app/artifacts \
+            -e QEMU_GDB=1234 \
+            -e QEMU_UNSET_ENV=QEMU_GDB \
+            -p 1234:1234 \
+            --privileged \
+            testcontainer bash -c '
+              mkdir -p /app/build/wr2_msgs /app/artifacts
+              cd /app/build/wr2_msgs
+              source /opt/ros/humble/setup.sh
+              exec cmake /app/src/wr2_msgs \
+                  -DCMAKE_PREFIX_PATH=/opt/ros/humble \
+                  -DCMAKE_VERBOSE_MAKEFILE=ON \
+                  -DBUILD_TESTING=OFF \
+                  -DCMAKE_INSTALL_PREFIX=/app/install/wr2_msgs
+            '
+
+          # Give container a moment to start and QEMU to open gdbstub
+          sleep 3
+
+          # Create GDB command script
+          cat > /tmp/gdb-commands.gdb << GDBEOF
+          set pagination off
+          set logging enabled on
+          set logging file ${{ github.workspace }}/artifacts/gdb-log.txt
+          set logging redirect on
+          target remote localhost:1234
+          catch syscall brk
+          commands
+            bt
+            c
+          end
+          c
+          GDBEOF
+
+          # Run GDB in background, connecting to QEMU's gdbstub
+          timeout 600 gdb-multiarch -batch -x /tmp/gdb-commands.gdb &
+          GDB_PID=$!
+
+          # Wait for container to complete
+          DOCKER_EXIT=$(docker wait cmake-build) || DOCKER_EXIT=1
+          echo "Container exited with: $DOCKER_EXIT"
+
+          # Give GDB a moment to finish writing
+          sleep 2
+
+          # Cleanup
+          kill $GDB_PID 2>/dev/null || true
+
+          # Capture container logs
+          docker logs cmake-build > ${{ github.workspace }}/artifacts/cmake-output.log 2>&1 || true
+          docker rm cmake-build 2>/dev/null || true
+
+          # Save exit code
+          echo "BUILD_EXIT_CODE=$DOCKER_EXIT" > ${{ github.workspace }}/artifacts/build_status.txt
+          exit $DOCKER_EXIT
 
       - name: Upload artifacts
         if: always()
