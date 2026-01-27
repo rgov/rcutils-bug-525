@@ -100,8 +100,7 @@ jobs:
         if: always()
         run: |
           docker run --name cmake-build -v ${{ github.workspace }}/artifacts:/app/artifacts \
-            --env QEMU_LOG=syscall,page \
-            --env QEMU_TRACE='exec_tb_*,translate_block' \
+            --env QEMU_LOG='syscall,page,trace:exec_tb_*,trace:translate_block,trace:target_mmap_*' \
             --env QEMU_LOG_FILENAME=/app/artifacts/qemu.log \
             testcontainer bash -c '
             mkdir -p /app/build/wr2_msgs /app/artifacts
