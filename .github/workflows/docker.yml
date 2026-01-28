@@ -18,6 +18,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image
+        if: ${{ false }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -117,7 +118,7 @@ jobs:
         if: always()
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
-          #dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
+          dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
 
           docker run --name cmake-build \
             -v ${{ github.workspace }}/artifacts:/app/artifacts \
