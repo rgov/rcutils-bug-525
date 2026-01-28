@@ -18,7 +18,6 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image
-        if: ${{ false }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -30,6 +29,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build custom cmake image
+        if: ${{ false }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -115,7 +115,7 @@ jobs:
           docker run --rm testcontainer-custom-cmake cmake --version
 
       - name: Run cmake build with QEMU tracing
-        if: always()
+        if: ${{ false }}
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
           dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
@@ -142,9 +142,15 @@ jobs:
           '
 
       - name: Run cmake build with GDB
-        if: ${{ false }}
+        if: always()
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
+          mkdir -p /tmp/sysroot
+
+          # Extract cmake binary and debug symbols from container for GDB
+          docker run --rm testcontainer cat /usr/bin/cmake > /tmp/sysroot/cmake
+          chmod +x /tmp/sysroot/cmake
+          docker run --rm testcontainer tar -cf - /usr/lib/debug | tar -xf - -C /tmp/sysroot --strip-components=3
 
           # Start container in background with QEMU waiting for GDB connection
           docker run -d --name cmake-build \
@@ -167,23 +173,17 @@ jobs:
           # Give container a moment to start and QEMU to open gdbstub
           sleep 3
 
-          # Create GDB command script
-          cat > /tmp/gdb-commands.gdb << GDBEOF
-          set pagination off
-          set logging enabled on
-          set logging file ${{ github.workspace }}/artifacts/gdb-log.txt
-          set logging redirect on
-          target remote localhost:1234
-          catch syscall brk
-          commands
-            bt
-            c
-          end
-          c
-          GDBEOF
-
-          # Run GDB in background, connecting to QEMU's gdbstub
-          timeout 600 gdb-multiarch -batch -x /tmp/gdb-commands.gdb &
+          # Run GDB, connecting to QEMU's gdbstub
+          timeout 600 gdb-multiarch -batch \
+            -ex "set pagination off" \
+            -ex "set logging enabled on" \
+            -ex "set logging file ${{ github.workspace }}/artifacts/gdb-log.txt" \
+            -ex "set logging redirect on" \
+            -ex "set sysroot /tmp/sysroot" \
+            -ex "set debug-file-directory /tmp/sysroot" \
+            -ex "file /tmp/sysroot/cmake" \
+            -ex "target remote localhost:1234" \
+            -ex "source ${{ github.workspace }}/gdb-directory-debug.py" &
           GDB_PID=$!
 
           # Wait for container to complete
