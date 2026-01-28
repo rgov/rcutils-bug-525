@@ -35,36 +35,39 @@ RUN cd /src/cmake-* && \
         -DCMAKE_USE_SYSTEM_LIBRARIES=ON \
         -DBUILD_TESTING=OFF
 
-# Full build (cached layer)
-RUN cd /src/cmake-*/Build && make -j$(nproc)
+# Full build (cached layer) - only cmake, not ctest/cpack/ccmake
+RUN cd /src/cmake-*/Build && make -j$(nproc) cmake
 
-# Install, strip binaries, extract debug symbols (like dh_strip does)
-RUN cd /src/cmake-*/Build && make install && \
+# Install, strip binary, extract debug symbols (like dh_strip does)
+RUN cd /src/cmake-*/Build && \
+    cp bin/cmake /usr/bin/cmake && \
     mkdir -p /usr/lib/debug/usr/bin && \
-    for bin in /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/bin/ccmake; do \
-        if [ -f "$bin" ]; then \
-            objcopy --only-keep-debug "$bin" "/usr/lib/debug${bin}.debug" && \
-            strip --strip-unneeded "$bin" && \
-            objcopy --add-gnu-debuglink="/usr/lib/debug${bin}.debug" "$bin"; \
-        fi; \
-    done
+    objcopy --only-keep-debug /usr/bin/cmake /usr/lib/debug/usr/bin/cmake.debug && \
+    strip --strip-unneeded /usr/bin/cmake && \
+    objcopy --add-gnu-debuglink=/usr/lib/debug/usr/bin/cmake.debug /usr/bin/cmake
 
 # === ADD COPY STEPS HERE TO OVERRIDE SOURCE FILES ===
 # Example: COPY my-modified-file.cxx /src/cmake-3.22.1/Source/cmGlobalGenerator.cxx
 
 # Incremental rebuild (will only rebuild changed files)
-RUN cd /src/cmake-*/Build && make -j$(nproc) && make install && \
+RUN cd /src/cmake-*/Build && make -j$(nproc) cmake && \
+    cp bin/cmake /usr/bin/cmake && \
     mkdir -p /usr/lib/debug/usr/bin && \
-    for bin in /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/bin/ccmake; do \
-        if [ -f "$bin" ]; then \
-            objcopy --only-keep-debug "$bin" "/usr/lib/debug${bin}.debug" && \
-            strip --strip-unneeded "$bin" && \
-            objcopy --add-gnu-debuglink="/usr/lib/debug${bin}.debug" "$bin"; \
-        fi; \
-    done
+    objcopy --only-keep-debug /usr/bin/cmake /usr/lib/debug/usr/bin/cmake.debug && \
+    strip --strip-unneeded /usr/bin/cmake && \
+    objcopy --add-gnu-debuglink=/usr/lib/debug/usr/bin/cmake.debug /usr/bin/cmake
 
 # Verify installation
 RUN cmake --version && file /usr/bin/cmake
 
-WORKDIR /src/cmake-3.22.1
-CMD ["bash"]
+# Now install the rest
+COPY wr2_msgs/ /app/src/wr2_msgs/
+
+RUN cat > /tmp/inject.sed << 'EOF'
+/NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH/,/)/{
+  /)/a\      message(STATUS "DEBUG: find_library rcutils _lib=${_lib}")
+}
+EOF
+RUN sed -i -f /tmp/inject.sed /opt/ros/humble/share/rcutils/cmake/ament_cmake_export_libraries-extras.cmake
+
+WORKDIR /app
