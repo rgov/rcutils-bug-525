@@ -109,11 +109,6 @@ jobs:
 
           exit $DOCKER_EXIT
 
-      - name: Print cmake version
-        if: always()
-        run: |
-          docker run --rm testcontainer-custom-cmake cmake --version
-
       - name: Run cmake build with QEMU tracing
         if: ${{ false }}
         run: |
