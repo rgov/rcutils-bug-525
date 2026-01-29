@@ -97,12 +97,12 @@ def stop_handler(event):
                 print(f"=== Done iter {State.iteration}: {State.step_count} steps in {elapsed:.2f}s ===")
                 State.stepping = False
                 State.last_errno = State.current_errno
-                gdb.execute("continue")
+                gdb.post_event(lambda: gdb.execute("continue"))
                 return
     except Exception as e:
         print(f"[STOP HANDLER] Frame check error: {e}")
 
-    gdb.execute("stepi")
+    gdb.execute("stepi", to_string=True)
 
 
 # Connect stop handler to gdb stop events
