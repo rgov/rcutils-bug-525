@@ -56,7 +56,7 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
         # Dump vector contents from internal structure
         if size > 0:
             print("Files contents:")
-            for i in range(min(size, 50)):  # Limit to 50 entries
+            for i in range(size):  # Limit to 50 entries
                 try:
                     elem = start[i]
                     # std::string internal: _M_dataplus._M_p points to char data
