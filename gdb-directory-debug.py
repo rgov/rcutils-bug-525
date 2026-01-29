@@ -18,13 +18,18 @@ class ReaddirBreakpoint(gdb.Breakpoint):
         count += 1
         gdb.execute("finish", to_string=True)
         errno = get_errno()
-        ret = int(gdb.parse_and_eval("$x0"))
+        ret = int(gdb.parse_and_eval("$x0"))  # return value on aarch64
         print(f"readdir #{count}: ret={hex(ret)}, errno={errno}")
         return False
 
 ReaddirBreakpoint()
 print("[INIT] Breakpoint set on readdir()")
-gdb.execute("run")
+
+# Continue only if attached to a target
+try:
+    gdb.execute("continue")
+except gdb.error as e:
+    print(f"Note: {e} (will continue when target is attached)")
 
 
 # =============================================================================
