@@ -1,5 +1,6 @@
 import gdb
 import re
+import time
 
 def hexdump(data, base_addr, bytes_per_line=16):
     """Format bytes as hex dump with address and ASCII."""
@@ -34,8 +35,13 @@ class State:
     iteration = 0
     last_known_ptr = None
     loop_iteration = 0
-    errno_watchpoint = None
     last_errno = 0
+    # For single-step errno tracking
+    stepping = False
+    start_line = 0
+    current_errno = 0
+    step_count = 0
+    iter_start = 0
 
 
 class FilesAccessBreakpoint(gdb.Breakpoint):
@@ -64,8 +70,47 @@ class FilesAccessBreakpoint(gdb.Breakpoint):
         return False
 
 
+def stop_handler(event):
+    """Handle stop events for single-step errno tracking."""
+    if not State.stepping:
+        return
+
+    State.step_count += 1
+    new_errno = get_errno()
+
+    if new_errno != State.current_errno:
+        pc = int(gdb.parse_and_eval("$pc"))
+        print(f"\n[ERRNO] {State.current_errno} -> {new_errno} step {State.step_count} PC={hex(pc)}")
+        gdb.execute("x/1i $pc")
+        gdb.execute("bt 5")
+        State.current_errno = new_errno
+
+    # Stop when back in original function at next line
+    try:
+        frame = gdb.selected_frame()
+        sal = frame.find_sal()
+        if sal.line and sal.line != State.start_line:
+            # Check we're in the right function (Directory::Load)
+            frame_name = str(frame.name()) if frame.name() else ""
+            if "Directory" in frame_name or "Load" in frame_name:
+                elapsed = time.time() - State.iter_start
+                print(f"=== Done iter {State.iteration}: {State.step_count} steps in {elapsed:.2f}s ===")
+                State.stepping = False
+                State.last_errno = State.current_errno
+                gdb.execute("continue")
+                return
+    except Exception as e:
+        print(f"[STOP HANDLER] Frame check error: {e}")
+
+    gdb.execute("stepi")
+
+
+# Connect stop handler to gdb stop events
+gdb.events.stop.connect(stop_handler)
+
+
 class DirectoryLoadBreakpoint(gdb.Breakpoint):
-    """Breakpoint on Directory::Load loop - detailed logging with hex dump."""
+    """Breakpoint on Directory::Load loop - single-steps each iteration watching errno."""
 
     def __init__(self):
         super().__init__("Directory.cxx:236", gdb.BP_BREAKPOINT)
@@ -75,49 +120,15 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
             return False
 
         State.iteration += 1
+        State.stepping = True
+        State.start_line = 236
+        State.current_errno = get_errno()
+        State.step_count = 0
+        State.iter_start = time.time()
+        print(f"=== Iter {State.iteration}, errno={State.current_errno} ===")
 
-        d_name = gdb.parse_and_eval("d->d_name").string()
-
-        files = gdb.parse_and_eval("this->Internal->Files")
-        impl = files["_M_impl"]
-        start = impl["_M_start"]
-        finish = impl["_M_finish"]
-        end_storage = impl["_M_end_of_storage"]
-
-        data_ptr = int(start)
-        size = int(finish - start)
-        capacity = int(end_storage - start)
-
-        # Check for pointer change
-        change_note = ""
-        if State.last_known_ptr is not None and data_ptr != State.last_known_ptr:
-            change_note = f" [CHANGED from {hex(State.last_known_ptr)}!]"
-        if data_ptr:
-            State.last_known_ptr = data_ptr
-
-        print(f"\n=== Directory::Load iteration {State.iteration} ===")
-        print(f"d->d_name: {d_name}")
-        print(f"Files.data(): {hex(data_ptr)}{change_note}")
-        print(f"Files.size(): {size}")
-        print(f"Files.capacity(): {capacity}")
-
-        # Dump vector contents from internal structure
-        if size > 0:
-            print("Files contents:")
-            for i in range(size):
-                elem = start[i]
-                s = elem["_M_dataplus"]["_M_p"].string()
-                print(f"  [{i}]: {s}")
-
-        # Hex dump of entire buffer (including uninitialized capacity)
-        if capacity > 0 and data_ptr != 0:
-            elem_size = start.dereference().type.sizeof
-            buffer_size = capacity * elem_size
-            mem = gdb.selected_inferior().read_memory(data_ptr, buffer_size)
-            print(f"Buffer hex dump ({buffer_size} bytes, sizeof(std::string)={elem_size}):")
-            print(hexdump(bytes(mem), data_ptr))
-
-        return False
+        # Return True to stop - stop_handler takes over on next stepi
+        return True
 
 
 class DirectoryLoadReturnBreakpoint(gdb.Breakpoint):
@@ -246,27 +257,6 @@ def get_errno():
     return -1
 
 
-class ErrnoWatchpoint(gdb.Breakpoint):
-    """Watchpoint on errno - tracks changes during interest area."""
-
-    def __init__(self):
-        errno_addr = get_errno_addr()
-        if errno_addr is None:
-            raise gdb.error("Cannot get errno address")
-        super().__init__(f"*{errno_addr}", gdb.BP_WATCHPOINT)
-        self.silent = True
-
-    def stop(self):
-        if not State.enabled:
-            return False
-        errno_val = get_errno()
-        print(f"[ERRNO] errno changed: {State.last_errno} -> {errno_val}")
-        State.last_errno = errno_val
-        # Print backtrace to see what set errno
-        gdb.execute("backtrace 5")
-        return False
-
-
 class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
     """Entry breakpoint for cmFindLibraryHelper::CheckDirectoryForName - enables logging if rcutils."""
 
@@ -287,13 +277,8 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
             State.iteration = 0
             State.loop_iteration = 0
             State.last_known_ptr = None
-            # Set up errno watchpoint
-            try:
-                State.last_errno = get_errno()
-                print(f"[ERRNO] Initial errno={State.last_errno}")
-                State.errno_watchpoint = ErrnoWatchpoint()
-            except gdb.error as e:
-                print(f"[ERRNO] Could not set watchpoint: {e}")
+            State.last_errno = get_errno()
+            print(f"[ERRNO] Initial errno={State.last_errno}")
             CheckDirectoryExitBreakpoint()
 
         return False
@@ -314,19 +299,11 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
         print(f"Active breakpoints: {len(gdb.breakpoints())}")
         for bp in gdb.breakpoints():
             print(f"  BP {bp.number}: {bp.location} enabled={bp.enabled}")
-        # Clean up errno watchpoint
-        if State.errno_watchpoint:
-            State.errno_watchpoint.delete()
-            State.errno_watchpoint = None
         State.enabled = False
         return False
 
     def out_of_scope(self):
         print("<<< CheckDirectoryForName went out of scope (longjmp/exception?)")
-        # Clean up errno watchpoint
-        if State.errno_watchpoint:
-            State.errno_watchpoint.delete()
-            State.errno_watchpoint = None
         State.enabled = False
 
 
