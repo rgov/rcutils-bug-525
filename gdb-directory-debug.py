@@ -32,10 +32,10 @@ class State:
 class FilesAccessBreakpoint(gdb.Breakpoint):
     """Generic breakpoint to log any access to this->Internal->Files."""
 
-    def __init__(self, location, description):
-        super().__init__(location, gdb.BP_BREAKPOINT)
+    def __init__(self, loc, description):
+        super().__init__(loc, gdb.BP_BREAKPOINT)
         self.description = description
-        self.location = location
+        self.loc = loc
 
     def stop(self):
         if not State.enabled:
@@ -51,7 +51,7 @@ class FilesAccessBreakpoint(gdb.Breakpoint):
         if ptr:
             State.last_known_ptr = ptr
 
-        print(f"[ACCESS] {self.location}: {self.description} -> data={ptr_str}{change_note}")
+        print(f"[ACCESS] {self.loc}: {self.description} -> data={ptr_str}{change_note}")
         return False
 
 
