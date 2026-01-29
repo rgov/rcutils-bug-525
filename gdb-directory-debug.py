@@ -241,11 +241,17 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
 
     def stop(self):
         ret = gdb.parse_and_eval("$x0")  # Return value on aarch64
-        print(f"<<< Exiting CheckDirectoryForName, return={int(ret)}")
+        print(f"\n<<< Exiting CheckDirectoryForName, return={int(ret)}")
+        print("Backtrace at exit:")
+        gdb.execute("backtrace 20")
+        print(f"Active breakpoints: {len(gdb.breakpoints())}")
+        for bp in gdb.breakpoints():
+            print(f"  BP {bp.number}: {bp.location} enabled={bp.enabled}")
         State.enabled = False
         return False
 
     def out_of_scope(self):
+        print("<<< CheckDirectoryForName went out of scope (longjmp/exception?)")
         State.enabled = False
 
 
@@ -256,7 +262,37 @@ FilesAccessBreakpoint("Directory.cxx:65", "operator[] in GetFile")
 FilesAccessBreakpoint("Directory.cxx:76", ".clear()")
 FilesAccessBreakpoint("Directory.cxx:133", ".push_back() [Windows]")
 
+class DirectoryLoadReturnValueBreakpoint(gdb.FinishBreakpoint):
+    """Track the actual return value of Directory::Load."""
+
+    def __init__(self, frame):
+        super().__init__(frame, internal=True)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+        ret = gdb.parse_and_eval("$x0")
+        print(f"\n[LOAD] Directory::Load returning {int(ret)}")
+        print(f"Final state: last_known_ptr={hex(State.last_known_ptr) if State.last_known_ptr else 'None'}, iterations={State.iteration}")
+        return False
+
+
+class DirectoryLoadEntryBreakpoint(gdb.Breakpoint):
+    """Track entry to Directory::Load to set up return value tracking."""
+
+    def __init__(self):
+        super().__init__("Directory.cxx:220", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+        print(f"\n[LOAD] Entering Directory::Load")
+        DirectoryLoadReturnValueBreakpoint(gdb.selected_frame())
+        return False
+
+
 # Detailed Directory::Load logging
+DirectoryLoadEntryBreakpoint()
 DirectoryLoadBreakpoint()
 
 # Load return value tracking
