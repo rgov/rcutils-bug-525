@@ -12,19 +12,60 @@ def hexdump(data, base_addr, bytes_per_line=16):
     return '\n'.join(lines)
 
 
+def get_files_data_ptr():
+    """Get the current data pointer for this->Internal->Files."""
+    try:
+        files = gdb.parse_and_eval("this->Internal->Files")
+        impl = files["_M_impl"]
+        return int(impl["_M_start"])
+    except:
+        return None
+
+
+# Global state for tracking
+class State:
+    enabled = False
+    iteration = 0
+    last_known_ptr = None
+
+
+class FilesAccessBreakpoint(gdb.Breakpoint):
+    """Generic breakpoint to log any access to this->Internal->Files."""
+
+    def __init__(self, location, description):
+        super().__init__(location, gdb.BP_BREAKPOINT)
+        self.description = description
+        self.location = location
+
+    def stop(self):
+        if not State.enabled:
+            return False
+
+        ptr = get_files_data_ptr()
+        ptr_str = hex(ptr) if ptr else "NULL"
+
+        # Check for pointer change
+        change_note = ""
+        if State.last_known_ptr is not None and ptr != State.last_known_ptr:
+            change_note = f" [CHANGED from {hex(State.last_known_ptr)}!]"
+        if ptr:
+            State.last_known_ptr = ptr
+
+        print(f"[ACCESS] {self.location}: {self.description} -> data={ptr_str}{change_note}")
+        return False
+
+
 class DirectoryLoadBreakpoint(gdb.Breakpoint):
-    """Breakpoint on Directory::Load loop - only active when triggered by rcutils search."""
+    """Breakpoint on Directory::Load loop - detailed logging with hex dump."""
 
     def __init__(self):
         super().__init__("Directory.cxx:236", gdb.BP_BREAKPOINT)
-        self.enabled = False  # Start disabled
-        self.iteration = 0
 
     def stop(self):
-        if not self.enabled:
+        if not State.enabled:
             return False
 
-        self.iteration += 1
+        State.iteration += 1
 
         # Get d->d_name (fresh each time)
         try:
@@ -44,19 +85,26 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
             size = int(finish - start)
             capacity = int(end_storage - start)
         except Exception as e:
-            print(f"[{self.iteration}] Error reading vector: {e}")
+            print(f"[{State.iteration}] Error reading vector: {e}")
             return False
 
-        print(f"\n=== Directory::Load iteration {self.iteration} ===")
+        # Check for pointer change
+        change_note = ""
+        if State.last_known_ptr is not None and data_ptr != State.last_known_ptr:
+            change_note = f" [CHANGED from {hex(State.last_known_ptr)}!]"
+        if data_ptr:
+            State.last_known_ptr = data_ptr
+
+        print(f"\n=== Directory::Load iteration {State.iteration} ===")
         print(f"d->d_name: {d_name}")
-        print(f"Files.data(): {hex(data_ptr)}")
+        print(f"Files.data(): {hex(data_ptr)}{change_note}")
         print(f"Files.size(): {size}")
         print(f"Files.capacity(): {capacity}")
 
         # Dump vector contents from internal structure
         if size > 0:
             print("Files contents:")
-            for i in range(size):  # Limit to 50 entries
+            for i in range(size):
                 try:
                     elem = start[i]
                     # std::string internal: _M_dataplus._M_p points to char data
@@ -83,9 +131,8 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
 class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
     """Entry breakpoint for cmFindLibraryHelper::CheckDirectoryForName - enables logging if rcutils."""
 
-    def __init__(self, dir_bp):
+    def __init__(self):
         super().__init__("cmFindLibraryHelper::CheckDirectoryForName", gdb.BP_BREAKPOINT)
-        self.dir_bp = dir_bp
         self.pattern = re.compile(r'.*rcutils.*')
 
     def stop(self):
@@ -99,10 +146,11 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
                 path = gdb.parse_and_eval("path")
                 path_str = path["_M_dataplus"]["_M_p"].string()
                 print(f"\n>>> Entering CheckDirectoryForName: name.Raw={raw_str}, path={path_str}")
-                self.dir_bp.enabled = True
-                self.dir_bp.iteration = 0
+                State.enabled = True
+                State.iteration = 0
+                State.last_known_ptr = None
                 # Set a finish breakpoint to disable when we return
-                CheckDirectoryExitBreakpoint(self.dir_bp)
+                CheckDirectoryExitBreakpoint()
         except Exception as e:
             print(f"CheckDirectoryEntry error: {e}")
 
@@ -110,24 +158,36 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
 
 
 class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
-    """Exit breakpoint to disable Directory::Load logging when CheckDirectoryForName returns."""
+    """Exit breakpoint to disable logging when CheckDirectoryForName returns."""
 
-    def __init__(self, dir_bp):
+    def __init__(self):
         super().__init__(internal=True)
-        self.dir_bp = dir_bp
 
     def stop(self):
         print(f"<<< Exiting CheckDirectoryForName")
-        self.dir_bp.enabled = False
+        State.enabled = False
         return False
 
     def out_of_scope(self):
-        self.dir_bp.enabled = False
+        State.enabled = False
 
 
-# Create breakpoints
-dir_bp = DirectoryLoadBreakpoint()
-CheckDirectoryEntryBreakpoint(dir_bp)
+# Create breakpoints for all Files access points in Directory.cxx:
+# Line 57: return this->Internal->Files.size()
+FilesAccessBreakpoint("Directory.cxx:57", ".size() in GetNumberOfFiles")
+# Line 62: if (dindex >= this->Internal->Files.size())
+FilesAccessBreakpoint("Directory.cxx:62", ".size() in GetFile bounds check")
+# Line 65: return this->Internal->Files[dindex].c_str()
+FilesAccessBreakpoint("Directory.cxx:65", "operator[] in GetFile")
+# Line 76: this->Internal->Files.clear()
+FilesAccessBreakpoint("Directory.cxx:76", ".clear()")
+# Line 133: Windows push_back (won't hit on Linux)
+FilesAccessBreakpoint("Directory.cxx:133", ".push_back() [Windows]")
+# Line 236: emplace_back - detailed logging
+DirectoryLoadBreakpoint()
+
+# Trigger breakpoint
+CheckDirectoryEntryBreakpoint()
 
 # Continue only if attached to a target
 try:
