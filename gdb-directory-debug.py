@@ -1,4 +1,5 @@
 import gdb
+import re
 
 def hexdump(data, base_addr, bytes_per_line=16):
     """Format bytes as hex dump with address and ASCII."""
@@ -10,12 +11,19 @@ def hexdump(data, base_addr, bytes_per_line=16):
         lines.append(f"  {base_addr + offset:016x}  {hex_part:<{bytes_per_line * 3}} |{ascii_part}|")
     return '\n'.join(lines)
 
+
 class DirectoryLoadBreakpoint(gdb.Breakpoint):
+    """Breakpoint on Directory::Load loop - only active when triggered by rcutils search."""
+
     def __init__(self):
         super().__init__("Directory.cxx:236", gdb.BP_BREAKPOINT)
+        self.enabled = False  # Start disabled
         self.iteration = 0
 
     def stop(self):
+        if not self.enabled:
+            return False
+
         self.iteration += 1
 
         # Get d->d_name (fresh each time)
@@ -71,7 +79,56 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
 
         return False  # Continue execution
 
-DirectoryLoadBreakpoint()
+
+class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
+    """Entry breakpoint for cmFindLibraryHelper::CheckDirectoryForName - enables logging if rcutils."""
+
+    def __init__(self, dir_bp):
+        super().__init__("cmFindLibraryHelper::CheckDirectoryForName", gdb.BP_BREAKPOINT)
+        self.dir_bp = dir_bp
+        self.pattern = re.compile(r'.*rcutils.*')
+
+    def stop(self):
+        # Check if the library name (name.Raw) matches rcutils
+        try:
+            name = gdb.parse_and_eval("name")
+            raw = name["Raw"]
+            raw_str = raw["_M_dataplus"]["_M_p"].string()
+
+            if self.pattern.match(raw_str):
+                path = gdb.parse_and_eval("path")
+                path_str = path["_M_dataplus"]["_M_p"].string()
+                print(f"\n>>> Entering CheckDirectoryForName: name.Raw={raw_str}, path={path_str}")
+                self.dir_bp.enabled = True
+                self.dir_bp.iteration = 0
+                # Set a finish breakpoint to disable when we return
+                CheckDirectoryExitBreakpoint(self.dir_bp)
+        except Exception as e:
+            print(f"CheckDirectoryEntry error: {e}")
+
+        return False  # Continue execution
+
+
+class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
+    """Exit breakpoint to disable Directory::Load logging when CheckDirectoryForName returns."""
+
+    def __init__(self, dir_bp):
+        super().__init__(internal=True)
+        self.dir_bp = dir_bp
+
+    def stop(self):
+        print(f"<<< Exiting CheckDirectoryForName")
+        self.dir_bp.enabled = False
+        return False
+
+    def out_of_scope(self):
+        self.dir_bp.enabled = False
+
+
+# Create breakpoints
+dir_bp = DirectoryLoadBreakpoint()
+CheckDirectoryEntryBreakpoint(dir_bp)
+
 # Continue only if attached to a target
 try:
     gdb.execute("continue")
