@@ -6,7 +6,10 @@ def get_errno():
     except:
         return None
 
-count = 0
+class State:
+    active = False
+    count = 0
+
 
 class ReaddirReturnBreakpoint(gdb.FinishBreakpoint):
     """Catch when readdir returns."""
@@ -15,6 +18,8 @@ class ReaddirReturnBreakpoint(gdb.FinishBreakpoint):
         self.num = num
 
     def stop(self):
+        if not State.active:
+            return False
         errno = get_errno()
         ret = int(gdb.parse_and_eval("$x0"))
         print(f"readdir #{self.num}: ret={hex(ret)}, errno={errno}")
@@ -30,13 +35,43 @@ class ReaddirBreakpoint(gdb.Breakpoint):
         super().__init__("readdir", gdb.BP_BREAKPOINT)
 
     def stop(self):
-        global count
-        count += 1
-        ReaddirReturnBreakpoint(count)
+        if not State.active:
+            return False
+        State.count += 1
+        ReaddirReturnBreakpoint(State.count)
         return False
 
+
+class DirectoryLoadExitBreakpoint(gdb.FinishBreakpoint):
+    """Deactivate tracking when Directory::Load returns."""
+    def __init__(self):
+        super().__init__(internal=True)
+
+    def stop(self):
+        print(f"<<< Directory::Load returned, {State.count} readdir calls")
+        State.active = False
+        return False
+
+    def out_of_scope(self):
+        State.active = False
+
+
+class DirectoryLoadBreakpoint(gdb.Breakpoint):
+    """Activate tracking when Directory::Load is entered."""
+    def __init__(self):
+        super().__init__("cmsys::Directory::Load", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        print(f">>> Entering Directory::Load")
+        State.active = True
+        State.count = 0
+        DirectoryLoadExitBreakpoint()
+        return False
+
+
 ReaddirBreakpoint()
-print("[INIT] Breakpoint set on readdir()")
+DirectoryLoadBreakpoint()
+print("[INIT] Tracking readdir inside Directory::Load")
 
 # Try run (local), fall back to continue (remote)
 try:
