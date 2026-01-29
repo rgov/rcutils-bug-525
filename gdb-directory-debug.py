@@ -13,21 +13,19 @@ def hexdump(data, base_addr, bytes_per_line=16):
 
 
 def get_files_data_ptr():
-    """Get the current data pointer for this->Internal->Files."""
+    """Get the current data pointer for this->Internal->Files. Returns None if not in right context."""
     try:
         files = gdb.parse_and_eval("this->Internal->Files")
         impl = files["_M_impl"]
         return int(impl["_M_start"])
-    except:
+    except gdb.error:
+        # Expected when not in a Directory method context
         return None
 
 
 def get_string(val):
     """Extract string from std::string value."""
-    try:
-        return val["_M_dataplus"]["_M_p"].string()
-    except:
-        return "<error>"
+    return val["_M_dataplus"]["_M_p"].string()
 
 
 # Global state for tracking
@@ -76,26 +74,17 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
 
         State.iteration += 1
 
-        # Get d->d_name (fresh each time)
-        try:
-            d_name = gdb.parse_and_eval("d->d_name").string()
-        except Exception as e:
-            d_name = f"<error: {e}>"
+        d_name = gdb.parse_and_eval("d->d_name").string()
 
-        # Get vector info from internal structure (methods may be inlined)
-        try:
-            files = gdb.parse_and_eval("this->Internal->Files")
-            impl = files["_M_impl"]
-            start = impl["_M_start"]
-            finish = impl["_M_finish"]
-            end_storage = impl["_M_end_of_storage"]
+        files = gdb.parse_and_eval("this->Internal->Files")
+        impl = files["_M_impl"]
+        start = impl["_M_start"]
+        finish = impl["_M_finish"]
+        end_storage = impl["_M_end_of_storage"]
 
-            data_ptr = int(start)
-            size = int(finish - start)
-            capacity = int(end_storage - start)
-        except Exception as e:
-            print(f"[{State.iteration}] Error reading vector: {e}")
-            return False
+        data_ptr = int(start)
+        size = int(finish - start)
+        capacity = int(end_storage - start)
 
         # Check for pointer change
         change_note = ""
@@ -114,46 +103,33 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
         if size > 0:
             print("Files contents:")
             for i in range(size):
-                try:
-                    elem = start[i]
-                    # std::string internal: _M_dataplus._M_p points to char data
-                    s = elem["_M_dataplus"]["_M_p"].string()
-                    print(f"  [{i}]: {s}")
-                except Exception as e:
-                    print(f"  [{i}]: <error: {e}>")
+                elem = start[i]
+                s = elem["_M_dataplus"]["_M_p"].string()
+                print(f"  [{i}]: {s}")
 
         # Hex dump of entire buffer (including uninitialized capacity)
         if capacity > 0 and data_ptr != 0:
-            try:
-                # Calculate buffer size: capacity * sizeof(std::string)
-                elem_size = start.dereference().type.sizeof
-                buffer_size = capacity * elem_size
-                mem = gdb.selected_inferior().read_memory(data_ptr, buffer_size)
-                print(f"Buffer hex dump ({buffer_size} bytes, sizeof(std::string)={elem_size}):")
-                print(hexdump(bytes(mem), data_ptr))
-            except Exception as e:
-                print(f"Hex dump error: {e}")
+            elem_size = start.dereference().type.sizeof
+            buffer_size = capacity * elem_size
+            mem = gdb.selected_inferior().read_memory(data_ptr, buffer_size)
+            print(f"Buffer hex dump ({buffer_size} bytes, sizeof(std::string)={elem_size}):")
+            print(hexdump(bytes(mem), data_ptr))
 
-        return False  # Continue execution
+        return False
 
 
 class DirectoryLoadReturnBreakpoint(gdb.Breakpoint):
     """Breakpoint after d.Load() call in GetDirectoryContent to log return value."""
 
     def __init__(self):
-        # Line 3001 is right after the if (d.Load(dir)) check
         super().__init__("cmGlobalGenerator.cxx:3001", gdb.BP_BREAKPOINT)
 
     def stop(self):
         if not State.enabled:
             return False
 
-        # If we hit line 3001, Load() returned true
-        try:
-            n = gdb.parse_and_eval("n")
-            print(f"[LOAD] d.Load() returned true, n={n} files")
-        except:
-            print(f"[LOAD] d.Load() returned true (in GetDirectoryContent)")
+        n = gdb.parse_and_eval("n")
+        print(f"[LOAD] d.Load() returned true, n={n} files")
         return False
 
 
@@ -161,7 +137,6 @@ class DirectoryLoadFailedBreakpoint(gdb.Breakpoint):
     """Breakpoint when Load() returns false - after the if block."""
 
     def __init__(self):
-        # Line 3009 is after the if block closes
         super().__init__("cmGlobalGenerator.cxx:3009", gdb.BP_BREAKPOINT)
 
     def stop(self):
@@ -175,7 +150,6 @@ class FileLoopBreakpoint(gdb.Breakpoint):
     """Breakpoint at the file iteration loop in CheckDirectoryForName."""
 
     def __init__(self):
-        # Line 441: if (name.Regex.find(testName))
         super().__init__("cmFindLibraryCommand.cxx:441", gdb.BP_BREAKPOINT)
 
     def stop(self):
@@ -183,12 +157,9 @@ class FileLoopBreakpoint(gdb.Breakpoint):
             return False
 
         State.loop_iteration += 1
-        try:
-            origName = gdb.parse_and_eval("origName")
-            name_str = get_string(origName)
-            print(f"[LOOP {State.loop_iteration}] Checking file: {name_str}")
-        except Exception as e:
-            print(f"[LOOP {State.loop_iteration}] Error: {e}")
+        origName = gdb.parse_and_eval("origName")
+        name_str = get_string(origName)
+        print(f"[LOOP {State.loop_iteration}] Checking file: {name_str}")
         return False
 
 
@@ -196,19 +167,15 @@ class RegexMatchBreakpoint(gdb.Breakpoint):
     """Breakpoint after regex match to log if file matched."""
 
     def __init__(self):
-        # Line 442: this->TestPath = cmStrCat(path, origName);
         super().__init__("cmFindLibraryCommand.cxx:442", gdb.BP_BREAKPOINT)
 
     def stop(self):
         if not State.enabled:
             return False
 
-        try:
-            origName = gdb.parse_and_eval("origName")
-            name_str = get_string(origName)
-            print(f"  -> REGEX MATCHED: {name_str}")
-        except Exception as e:
-            print(f"  -> REGEX MATCHED (error: {e})")
+        origName = gdb.parse_and_eval("origName")
+        name_str = get_string(origName)
+        print(f"  -> REGEX MATCHED: {name_str}")
         return False
 
 
@@ -216,19 +183,15 @@ class FileExistsBreakpoint(gdb.Breakpoint):
     """Breakpoint when file exists check passes."""
 
     def __init__(self):
-        # Line 445: this->DebugLibraryFound(name.Raw, dir);
         super().__init__("cmFindLibraryCommand.cxx:445", gdb.BP_BREAKPOINT)
 
     def stop(self):
         if not State.enabled:
             return False
 
-        try:
-            test_path = gdb.parse_and_eval("this->TestPath")
-            path_str = get_string(test_path)
-            print(f"  -> FILE EXISTS: {path_str}")
-        except Exception as e:
-            print(f"  -> FILE EXISTS (error: {e})")
+        test_path = gdb.parse_and_eval("this->TestPath")
+        path_str = get_string(test_path)
+        print(f"  -> FILE EXISTS: {path_str}")
         return False
 
 
@@ -236,7 +199,6 @@ class BestPathUpdateBreakpoint(gdb.Breakpoint):
     """Breakpoint when BestPath gets updated."""
 
     def __init__(self):
-        # Line 463: this->BestPath = this->TestPath;
         super().__init__("cmFindLibraryCommand.cxx:463", gdb.BP_BREAKPOINT)
 
     def stop(self):
@@ -254,26 +216,21 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
         self.pattern = re.compile(r'.*rcutils.*')
 
     def stop(self):
-        # Check if the library name (name.Raw) matches rcutils
-        try:
-            name = gdb.parse_and_eval("name")
-            raw = name["Raw"]
-            raw_str = raw["_M_dataplus"]["_M_p"].string()
+        name = gdb.parse_and_eval("name")
+        raw = name["Raw"]
+        raw_str = raw["_M_dataplus"]["_M_p"].string()
 
-            if self.pattern.match(raw_str):
-                path = gdb.parse_and_eval("path")
-                path_str = path["_M_dataplus"]["_M_p"].string()
-                print(f"\n>>> Entering CheckDirectoryForName: name.Raw={raw_str}, path={path_str}")
-                State.enabled = True
-                State.iteration = 0
-                State.loop_iteration = 0
-                State.last_known_ptr = None
-                # Set a finish breakpoint to disable when we return
-                CheckDirectoryExitBreakpoint()
-        except Exception as e:
-            print(f"CheckDirectoryEntry error: {e}")
+        if self.pattern.match(raw_str):
+            path = gdb.parse_and_eval("path")
+            path_str = path["_M_dataplus"]["_M_p"].string()
+            print(f"\n>>> Entering CheckDirectoryForName: name.Raw={raw_str}, path={path_str}")
+            State.enabled = True
+            State.iteration = 0
+            State.loop_iteration = 0
+            State.last_known_ptr = None
+            CheckDirectoryExitBreakpoint()
 
-        return False  # Continue execution
+        return False
 
 
 class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
@@ -283,11 +240,8 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
         super().__init__(internal=True)
 
     def stop(self):
-        try:
-            ret = gdb.parse_and_eval("$rax")  # Return value on x86_64
-            print(f"<<< Exiting CheckDirectoryForName, return={int(ret)}")
-        except:
-            print(f"<<< Exiting CheckDirectoryForName")
+        ret = gdb.parse_and_eval("$x0")  # Return value on aarch64
+        print(f"<<< Exiting CheckDirectoryForName, return={int(ret)}")
         State.enabled = False
         return False
 
