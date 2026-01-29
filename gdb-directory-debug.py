@@ -34,6 +34,8 @@ class State:
     iteration = 0
     last_known_ptr = None
     loop_iteration = 0
+    errno_watchpoint = None
+    last_errno = 0
 
 
 class FilesAccessBreakpoint(gdb.Breakpoint):
@@ -142,7 +144,24 @@ class DirectoryLoadFailedBreakpoint(gdb.Breakpoint):
     def stop(self):
         if not State.enabled:
             return False
-        print(f"[LOAD] GetDirectoryContent completed")
+        print(f"[LOAD] GetDirectoryContent completed (line 3009 - after if block)")
+        return False
+
+
+class InsideIfBlockBreakpoint(gdb.Breakpoint):
+    """Breakpoint inside the if(d.Load()) block - line 3003 is inside the for loop."""
+
+    def __init__(self):
+        super().__init__("cmGlobalGenerator.cxx:3003", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+        f = gdb.parse_and_eval("f")
+        f_str = f.string() if f else "NULL"
+        i = gdb.parse_and_eval("i")
+        n = gdb.parse_and_eval("n")
+        print(f"[IF-BLOCK] Inside if(d.Load()) block: f[{int(i)}]=\"{f_str}\", n={int(n)}")
         return False
 
 
@@ -208,6 +227,26 @@ class BestPathUpdateBreakpoint(gdb.Breakpoint):
         return False
 
 
+class ErrnoWatchpoint(gdb.Breakpoint):
+    """Watchpoint on errno - tracks changes during interest area."""
+
+    def __init__(self):
+        # Get address of errno via __errno_location()
+        errno_addr = gdb.parse_and_eval("__errno_location()")
+        super().__init__(f"*{int(errno_addr)}", gdb.BP_WATCHPOINT)
+        self.silent = True
+
+    def stop(self):
+        if not State.enabled:
+            return False
+        errno_val = int(gdb.parse_and_eval("*__errno_location()"))
+        print(f"[ERRNO] errno changed: {State.last_errno} -> {errno_val}")
+        State.last_errno = errno_val
+        # Print backtrace to see what set errno
+        gdb.execute("backtrace 5")
+        return False
+
+
 class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
     """Entry breakpoint for cmFindLibraryHelper::CheckDirectoryForName - enables logging if rcutils."""
 
@@ -228,6 +267,13 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
             State.iteration = 0
             State.loop_iteration = 0
             State.last_known_ptr = None
+            # Set up errno watchpoint
+            try:
+                State.last_errno = int(gdb.parse_and_eval("*__errno_location()"))
+                print(f"[ERRNO] Initial errno={State.last_errno}")
+                State.errno_watchpoint = ErrnoWatchpoint()
+            except gdb.error as e:
+                print(f"[ERRNO] Could not set watchpoint: {e}")
             CheckDirectoryExitBreakpoint()
 
         return False
@@ -241,17 +287,26 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
 
     def stop(self):
         ret = gdb.parse_and_eval("$x0")  # Return value on aarch64
-        print(f"\n<<< Exiting CheckDirectoryForName, return={int(ret)}")
+        final_errno = int(gdb.parse_and_eval("*__errno_location()"))
+        print(f"\n<<< Exiting CheckDirectoryForName, return={int(ret)}, final errno={final_errno}")
         print("Backtrace at exit:")
         gdb.execute("backtrace 20")
         print(f"Active breakpoints: {len(gdb.breakpoints())}")
         for bp in gdb.breakpoints():
             print(f"  BP {bp.number}: {bp.location} enabled={bp.enabled}")
+        # Clean up errno watchpoint
+        if State.errno_watchpoint:
+            State.errno_watchpoint.delete()
+            State.errno_watchpoint = None
         State.enabled = False
         return False
 
     def out_of_scope(self):
         print("<<< CheckDirectoryForName went out of scope (longjmp/exception?)")
+        # Clean up errno watchpoint
+        if State.errno_watchpoint:
+            State.errno_watchpoint.delete()
+            State.errno_watchpoint = None
         State.enabled = False
 
 
@@ -271,9 +326,15 @@ class DirectoryLoadReturnValueBreakpoint(gdb.FinishBreakpoint):
     def stop(self):
         if not State.enabled:
             return False
-        ret = gdb.parse_and_eval("$x0")
-        print(f"\n[LOAD] Directory::Load returning {int(ret)}")
+        # Read both full register and masked value
+        x0 = int(gdb.parse_and_eval("$x0"))
+        w0 = x0 & 0xFFFFFFFF  # Lower 32 bits
+        bool_val = x0 & 0xFF  # Lowest byte (bool)
+        print(f"\n[LOAD] Directory::Load returning: x0={hex(x0)}, w0={hex(w0)}, bool={bool_val}")
         print(f"Final state: last_known_ptr={hex(State.last_known_ptr) if State.last_known_ptr else 'None'}, iterations={State.iteration}")
+        # Disassemble the return site to see caller's check
+        print("Caller disassembly (next 10 instructions):")
+        gdb.execute("x/10i $pc")
         return False
 
 
@@ -298,6 +359,7 @@ DirectoryLoadBreakpoint()
 # Load return value tracking
 DirectoryLoadReturnBreakpoint()
 DirectoryLoadFailedBreakpoint()
+InsideIfBlockBreakpoint()
 
 # File search loop tracking
 FileLoopBreakpoint()
