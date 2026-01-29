@@ -22,11 +22,20 @@ def get_files_data_ptr():
         return None
 
 
+def get_string(val):
+    """Extract string from std::string value."""
+    try:
+        return val["_M_dataplus"]["_M_p"].string()
+    except:
+        return "<error>"
+
+
 # Global state for tracking
 class State:
     enabled = False
     iteration = 0
     last_known_ptr = None
+    loop_iteration = 0
 
 
 class FilesAccessBreakpoint(gdb.Breakpoint):
@@ -128,6 +137,115 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
         return False  # Continue execution
 
 
+class DirectoryLoadReturnBreakpoint(gdb.Breakpoint):
+    """Breakpoint after d.Load() call in GetDirectoryContent to log return value."""
+
+    def __init__(self):
+        # Line 3001 is right after the if (d.Load(dir)) check
+        super().__init__("cmGlobalGenerator.cxx:3001", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+
+        # If we hit line 3001, Load() returned true
+        try:
+            n = gdb.parse_and_eval("n")
+            print(f"[LOAD] d.Load() returned true, n={n} files")
+        except:
+            print(f"[LOAD] d.Load() returned true (in GetDirectoryContent)")
+        return False
+
+
+class DirectoryLoadFailedBreakpoint(gdb.Breakpoint):
+    """Breakpoint when Load() returns false - after the if block."""
+
+    def __init__(self):
+        # Line 3009 is after the if block closes
+        super().__init__("cmGlobalGenerator.cxx:3009", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+        print(f"[LOAD] GetDirectoryContent completed")
+        return False
+
+
+class FileLoopBreakpoint(gdb.Breakpoint):
+    """Breakpoint at the file iteration loop in CheckDirectoryForName."""
+
+    def __init__(self):
+        # Line 441: if (name.Regex.find(testName))
+        super().__init__("cmFindLibraryCommand.cxx:441", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+
+        State.loop_iteration += 1
+        try:
+            origName = gdb.parse_and_eval("origName")
+            name_str = get_string(origName)
+            print(f"[LOOP {State.loop_iteration}] Checking file: {name_str}")
+        except Exception as e:
+            print(f"[LOOP {State.loop_iteration}] Error: {e}")
+        return False
+
+
+class RegexMatchBreakpoint(gdb.Breakpoint):
+    """Breakpoint after regex match to log if file matched."""
+
+    def __init__(self):
+        # Line 442: this->TestPath = cmStrCat(path, origName);
+        super().__init__("cmFindLibraryCommand.cxx:442", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+
+        try:
+            origName = gdb.parse_and_eval("origName")
+            name_str = get_string(origName)
+            print(f"  -> REGEX MATCHED: {name_str}")
+        except Exception as e:
+            print(f"  -> REGEX MATCHED (error: {e})")
+        return False
+
+
+class FileExistsBreakpoint(gdb.Breakpoint):
+    """Breakpoint when file exists check passes."""
+
+    def __init__(self):
+        # Line 445: this->DebugLibraryFound(name.Raw, dir);
+        super().__init__("cmFindLibraryCommand.cxx:445", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+
+        try:
+            test_path = gdb.parse_and_eval("this->TestPath")
+            path_str = get_string(test_path)
+            print(f"  -> FILE EXISTS: {path_str}")
+        except Exception as e:
+            print(f"  -> FILE EXISTS (error: {e})")
+        return False
+
+
+class BestPathUpdateBreakpoint(gdb.Breakpoint):
+    """Breakpoint when BestPath gets updated."""
+
+    def __init__(self):
+        # Line 463: this->BestPath = this->TestPath;
+        super().__init__("cmFindLibraryCommand.cxx:463", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        if not State.enabled:
+            return False
+        print(f"  -> BESTPATH UPDATED (line 463 hit)")
+        return False
+
+
 class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
     """Entry breakpoint for cmFindLibraryHelper::CheckDirectoryForName - enables logging if rcutils."""
 
@@ -148,6 +266,7 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
                 print(f"\n>>> Entering CheckDirectoryForName: name.Raw={raw_str}, path={path_str}")
                 State.enabled = True
                 State.iteration = 0
+                State.loop_iteration = 0
                 State.last_known_ptr = None
                 # Set a finish breakpoint to disable when we return
                 CheckDirectoryExitBreakpoint()
@@ -164,7 +283,11 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
         super().__init__(internal=True)
 
     def stop(self):
-        print(f"<<< Exiting CheckDirectoryForName")
+        try:
+            ret = gdb.parse_and_eval("$rax")  # Return value on x86_64
+            print(f"<<< Exiting CheckDirectoryForName, return={int(ret)}")
+        except:
+            print(f"<<< Exiting CheckDirectoryForName")
         State.enabled = False
         return False
 
@@ -173,18 +296,24 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
 
 
 # Create breakpoints for all Files access points in Directory.cxx:
-# Line 57: return this->Internal->Files.size()
 FilesAccessBreakpoint("Directory.cxx:57", ".size() in GetNumberOfFiles")
-# Line 62: if (dindex >= this->Internal->Files.size())
 FilesAccessBreakpoint("Directory.cxx:62", ".size() in GetFile bounds check")
-# Line 65: return this->Internal->Files[dindex].c_str()
 FilesAccessBreakpoint("Directory.cxx:65", "operator[] in GetFile")
-# Line 76: this->Internal->Files.clear()
 FilesAccessBreakpoint("Directory.cxx:76", ".clear()")
-# Line 133: Windows push_back (won't hit on Linux)
 FilesAccessBreakpoint("Directory.cxx:133", ".push_back() [Windows]")
-# Line 236: emplace_back - detailed logging
+
+# Detailed Directory::Load logging
 DirectoryLoadBreakpoint()
+
+# Load return value tracking
+DirectoryLoadReturnBreakpoint()
+DirectoryLoadFailedBreakpoint()
+
+# File search loop tracking
+FileLoopBreakpoint()
+RegexMatchBreakpoint()
+FileExistsBreakpoint()
+BestPathUpdateBreakpoint()
 
 # Trigger breakpoint
 CheckDirectoryEntryBreakpoint()
