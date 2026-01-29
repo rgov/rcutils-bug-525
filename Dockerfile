@@ -9,7 +9,7 @@ RUN apt-get update && \
     sed -i 's|deb http://ddebs.ubuntu.com|deb [signed-by=/usr/share/keyrings/ddebs-archive-keyring.gpg] http://ddebs.ubuntu.com|g' /etc/apt/sources.list.d/ddebs.list && \
     apt-get update && \
     DBGSYM_VERSION=$(apt-cache show cmake-dbgsym 2>/dev/null | grep -m1 '^Version:' | awk '{print $2}') && \
-    apt-get install -y --allow-downgrades cmake=$DBGSYM_VERSION cmake-data=$DBGSYM_VERSION cmake-dbgsym=$DBGSYM_VERSION && \
+    apt-get install -y --allow-downgrades cmake=$DBGSYM_VERSION cmake-data=$DBGSYM_VERSION cmake-dbgsym=$DBGSYM_VERSION gdbserver && \
     rm -rf /var/lib/apt/lists/*
 
 COPY wr2_msgs/ /app/src/wr2_msgs/
