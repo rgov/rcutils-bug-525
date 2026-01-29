@@ -227,19 +227,39 @@ class BestPathUpdateBreakpoint(gdb.Breakpoint):
         return False
 
 
+def get_errno_addr():
+    """Get address of errno."""
+    try:
+        return int(gdb.parse_and_eval("(long)__errno_location()"))
+    except gdb.error:
+        return None
+
+
+def get_errno():
+    """Get current errno value, handling GDB type issues."""
+    addr = get_errno_addr()
+    if addr:
+        try:
+            return int(gdb.parse_and_eval(f"*(int*){addr}"))
+        except gdb.error:
+            pass
+    return -1
+
+
 class ErrnoWatchpoint(gdb.Breakpoint):
     """Watchpoint on errno - tracks changes during interest area."""
 
     def __init__(self):
-        # Get address of errno via __errno_location()
-        errno_addr = gdb.parse_and_eval("__errno_location()")
-        super().__init__(f"*{int(errno_addr)}", gdb.BP_WATCHPOINT)
+        errno_addr = get_errno_addr()
+        if errno_addr is None:
+            raise gdb.error("Cannot get errno address")
+        super().__init__(f"*{errno_addr}", gdb.BP_WATCHPOINT)
         self.silent = True
 
     def stop(self):
         if not State.enabled:
             return False
-        errno_val = int(gdb.parse_and_eval("*__errno_location()"))
+        errno_val = get_errno()
         print(f"[ERRNO] errno changed: {State.last_errno} -> {errno_val}")
         State.last_errno = errno_val
         # Print backtrace to see what set errno
@@ -269,7 +289,7 @@ class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
             State.last_known_ptr = None
             # Set up errno watchpoint
             try:
-                State.last_errno = int(gdb.parse_and_eval("*__errno_location()"))
+                State.last_errno = get_errno()
                 print(f"[ERRNO] Initial errno={State.last_errno}")
                 State.errno_watchpoint = ErrnoWatchpoint()
             except gdb.error as e:
@@ -287,7 +307,7 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
 
     def stop(self):
         ret = gdb.parse_and_eval("$x0")  # Return value on aarch64
-        final_errno = int(gdb.parse_and_eval("*__errno_location()"))
+        final_errno = get_errno()
         print(f"\n<<< Exiting CheckDirectoryForName, return={int(ret)}, final errno={final_errno}")
         print("Backtrace at exit:")
         gdb.execute("backtrace 20")
