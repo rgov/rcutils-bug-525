@@ -1,398 +1,168 @@
 import gdb
-import re
-import time
-
-
-def get_return_register():
-    """Get the return value register name for the current architecture."""
-    arch = gdb.selected_frame().architecture().name()
-    if "aarch64" in arch or "arm" in arch:
-        return "$x0"
-    elif "x86-64" in arch or "i386:x86-64" in arch:
-        return "$rax"
-    elif "i386" in arch or "i686" in arch:
-        return "$eax"
-    else:
-        # Default to trying x0, will error if wrong
-        return "$x0"
-
-def hexdump(data, base_addr, bytes_per_line=16):
-    """Format bytes as hex dump with address and ASCII."""
-    lines = []
-    for offset in range(0, len(data), bytes_per_line):
-        chunk = data[offset:offset + bytes_per_line]
-        hex_part = ' '.join(f'{b:02x}' for b in chunk)
-        ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-        lines.append(f"  {base_addr + offset:016x}  {hex_part:<{bytes_per_line * 3}} |{ascii_part}|")
-    return '\n'.join(lines)
-
-
-def get_files_data_ptr():
-    """Get the current data pointer for this->Internal->Files. Returns None if not in right context."""
-    try:
-        files = gdb.parse_and_eval("this->Internal->Files")
-        impl = files["_M_impl"]
-        return int(impl["_M_start"])
-    except gdb.error:
-        # Expected when not in a Directory method context
-        return None
-
-
-def get_string(val):
-    """Extract string from std::string value."""
-    return val["_M_dataplus"]["_M_p"].string()
-
-
-# Global state for tracking
-class State:
-    enabled = False
-    iteration = 0
-    last_known_ptr = None
-    loop_iteration = 0
-    last_errno = 0
-    pending_step = False  # Flag for stop event handler
-
-
-class FilesAccessBreakpoint(gdb.Breakpoint):
-    """Generic breakpoint to log any access to this->Internal->Files."""
-
-    def __init__(self, loc, description):
-        super().__init__(loc, gdb.BP_BREAKPOINT)
-        self.description = description
-        self.loc = loc
-
-    def stop(self):
-        if not State.enabled:
-            return False
-
-        ptr = get_files_data_ptr()
-        ptr_str = hex(ptr) if ptr else "NULL"
-
-        # Check for pointer change
-        change_note = ""
-        if State.last_known_ptr is not None and ptr != State.last_known_ptr:
-            change_note = f" [CHANGED from {hex(State.last_known_ptr)}!]"
-        if ptr:
-            State.last_known_ptr = ptr
-
-        print(f"[ACCESS] {self.loc}: {self.description} -> data={ptr_str}{change_note}")
-        return False
-
-
-def step_through_iteration():
-    """Single-step through one loop iteration, watching for errno changes."""
-    start_time = time.time()
-    step_count = 0
-    current_errno = get_errno()
-    start_line = 236
-    max_steps = 10000  # Safety limit
-
-    while step_count < max_steps:
-        gdb.execute("stepi", to_string=True)
-        step_count += 1
-
-        new_errno = get_errno()
-        if new_errno != current_errno:
-            pc = int(gdb.parse_and_eval("$pc"))
-            print(f"\n[ERRNO] {current_errno} -> {new_errno} step {step_count} PC={hex(pc)}")
-            gdb.execute("x/1i $pc")
-            gdb.execute("bt 5")
-            current_errno = new_errno
-
-        # Check if we're back in Directory::Load at a different line
-        try:
-            frame = gdb.selected_frame()
-            depth = 0
-            while frame is not None and depth < 20:
-                frame_name = str(frame.name()) if frame.name() else ""
-                if "Directory" in frame_name and "Load" in frame_name:
-                    sal = frame.find_sal()
-                    if sal.line and sal.line != start_line:
-                        elapsed = time.time() - start_time
-                        print(f"=== Done iter {State.iteration}: {step_count} steps in {elapsed:.2f}s ===")
-                        return
-                    break
-                frame = frame.older()
-                depth += 1
-        except Exception as e:
-            print(f"[STEP] Frame check error: {e}")
-
-    print(f"[STEP] Hit max steps ({max_steps})")
-
-
-class DirectoryLoadBreakpoint(gdb.Breakpoint):
-    """Breakpoint on Directory::Load loop - triggers step_through_iteration via stop event."""
-
-    def __init__(self):
-        super().__init__("Directory.cxx:236", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-
-        State.iteration += 1
-        State.pending_step = True  # Flag for stop event handler
-        print(f"=== Iter {State.iteration}, errno={get_errno()} ===")
-
-        # Return True to stop - stop event handler will do the stepping
-        return True
-
-
-def stop_event_handler(event):
-    """Called after GDB fully stops - can safely execute commands."""
-    if not State.pending_step:
-        return
-
-    State.pending_step = False
-    try:
-        step_through_iteration()
-    except Exception as e:
-        print(f"[STEP ERROR] {e}")
-    gdb.execute("continue")
-
-
-gdb.events.stop.connect(stop_event_handler)
-
-
-class DirectoryLoadReturnBreakpoint(gdb.Breakpoint):
-    """Breakpoint after d.Load() call in GetDirectoryContent to log return value."""
-
-    def __init__(self):
-        super().__init__("cmGlobalGenerator.cxx:3001", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-
-        n = gdb.parse_and_eval("n")
-        print(f"[LOAD] d.Load() returned true, n={n} files")
-        return False
-
-
-class DirectoryLoadFailedBreakpoint(gdb.Breakpoint):
-    """Breakpoint when Load() returns false - after the if block."""
-
-    def __init__(self):
-        super().__init__("cmGlobalGenerator.cxx:3009", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-        print(f"[LOAD] GetDirectoryContent completed (line 3009 - after if block)")
-        return False
-
-
-class InsideIfBlockBreakpoint(gdb.Breakpoint):
-    """Breakpoint inside the if(d.Load()) block - line 3003 is inside the for loop."""
-
-    def __init__(self):
-        super().__init__("cmGlobalGenerator.cxx:3003", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-        f = gdb.parse_and_eval("f")
-        f_str = f.string() if f else "NULL"
-        i = gdb.parse_and_eval("i")
-        n = gdb.parse_and_eval("n")
-        print(f"[IF-BLOCK] Inside if(d.Load()) block: f[{int(i)}]=\"{f_str}\", n={int(n)}")
-        return False
-
-
-class FileLoopBreakpoint(gdb.Breakpoint):
-    """Breakpoint at the file iteration loop in CheckDirectoryForName."""
-
-    def __init__(self):
-        super().__init__("cmFindLibraryCommand.cxx:441", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-
-        State.loop_iteration += 1
-        origName = gdb.parse_and_eval("origName")
-        name_str = get_string(origName)
-        print(f"[LOOP {State.loop_iteration}] Checking file: {name_str}")
-        return False
-
-
-class RegexMatchBreakpoint(gdb.Breakpoint):
-    """Breakpoint after regex match to log if file matched."""
-
-    def __init__(self):
-        super().__init__("cmFindLibraryCommand.cxx:442", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-
-        origName = gdb.parse_and_eval("origName")
-        name_str = get_string(origName)
-        print(f"  -> REGEX MATCHED: {name_str}")
-        return False
-
-
-class FileExistsBreakpoint(gdb.Breakpoint):
-    """Breakpoint when file exists check passes."""
-
-    def __init__(self):
-        super().__init__("cmFindLibraryCommand.cxx:445", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-
-        test_path = gdb.parse_and_eval("this->TestPath")
-        path_str = get_string(test_path)
-        print(f"  -> FILE EXISTS: {path_str}")
-        return False
-
-
-class BestPathUpdateBreakpoint(gdb.Breakpoint):
-    """Breakpoint when BestPath gets updated."""
-
-    def __init__(self):
-        super().__init__("cmFindLibraryCommand.cxx:463", gdb.BP_BREAKPOINT)
-
-    def stop(self):
-        if not State.enabled:
-            return False
-        print(f"  -> BESTPATH UPDATED (line 463 hit)")
-        return False
-
-
-def get_errno_addr():
-    """Get address of errno."""
-    try:
-        return int(gdb.parse_and_eval("(long)__errno_location()"))
-    except gdb.error:
-        return None
-
 
 def get_errno():
-    """Get current errno value, handling GDB type issues."""
-    addr = get_errno_addr()
-    if addr:
+    try:
+        return int(gdb.parse_and_eval("*(int*)__errno_location()"))
+    except:
+        return None
+
+count = 0
+
+class ReaddirBreakpoint(gdb.Breakpoint):
+    """Break on readdir call, then check errno after it returns."""
+    def __init__(self):
+        super().__init__("readdir", gdb.BP_BREAKPOINT)
+
+    def stop(self):
+        global count
+        count += 1
+        gdb.execute("finish", to_string=True)
+        errno = get_errno()
+        ret = int(gdb.parse_and_eval("$x0"))
+        print(f"readdir #{count}: ret={hex(ret)}, errno={errno}")
+        return False
+
+ReaddirBreakpoint()
+print("[INIT] Breakpoint set on readdir()")
+gdb.execute("run")
+
+
+# =============================================================================
+# CALL GRAPH ANALYSIS (skipped for now)
+# =============================================================================
+if False:
+    import re
+
+    def get_symbol_at_addr(addr):
+        """Get symbol name at address, or empty string if none."""
         try:
-            return int(gdb.parse_and_eval(f"*(int*){addr}"))
-        except gdb.error:
-            pass
-    return -1
+            result = gdb.execute(f"info symbol {addr}", to_string=True)
+            if "No symbol" in result:
+                return ""
+            return result.split()[0]
+        except:
+            return ""
 
+    def get_full_function_disasm(addr):
+        """Disassemble function at addr. Returns list of (addr, instruction) tuples."""
+        try:
+            result = gdb.execute(f"disassemble {addr}", to_string=True)
+            lines = []
+            for line in result.split('\n'):
+                m = re.match(r'[=>\s]*0x([0-9a-fA-F]+)\s+<[^>]+>:\s+(.+)', line)
+                if m:
+                    insn_addr = int(m.group(1), 16)
+                    insn_text = m.group(2).strip()
+                    lines.append((insn_addr, insn_text))
+            return lines
+        except Exception as e:
+            return []
 
-class CheckDirectoryEntryBreakpoint(gdb.Breakpoint):
-    """Entry breakpoint for cmFindLibraryHelper::CheckDirectoryForName - enables logging if rcutils."""
+    def find_call_targets(disasm_lines):
+        """Find all bl (branch-link) call targets from disassembly."""
+        targets = []
+        for addr, insn in disasm_lines:
+            m = re.search(r'\bbl\s+0x([0-9a-fA-F]+)', insn)
+            if m:
+                target = int(m.group(1), 16)
+                targets.append(target)
+        return list(set(targets))
 
-    def __init__(self):
-        super().__init__("cmFindLibraryHelper::CheckDirectoryForName", gdb.BP_BREAKPOINT)
-        self.pattern = re.compile(r'.*rcutils.*')
+    def build_call_graph(start_addr, max_depth=10):
+        """Recursively build complete call graph starting from address."""
+        visited = {}
+        to_visit = [(start_addr, 0)]
 
-    def stop(self):
-        name = gdb.parse_and_eval("name")
-        raw = name["Raw"]
-        raw_str = raw["_M_dataplus"]["_M_p"].string()
+        while to_visit:
+            addr, depth = to_visit.pop(0)
 
-        if self.pattern.match(raw_str):
-            path = gdb.parse_and_eval("path")
-            path_str = path["_M_dataplus"]["_M_p"].string()
-            print(f"\n>>> Entering CheckDirectoryForName: name.Raw={raw_str}, path={path_str}")
-            State.enabled = True
-            State.iteration = 0
-            State.loop_iteration = 0
-            State.last_known_ptr = None
-            State.last_errno = get_errno()
-            print(f"[ERRNO] Initial errno={State.last_errno}")
-            CheckDirectoryExitBreakpoint()
+            if addr in visited:
+                continue
 
-        return False
+            if depth > max_depth:
+                visited[addr] = {
+                    'symbol': get_symbol_at_addr(addr),
+                    'insn_count': 0,
+                    'callees': [],
+                    'depth': depth,
+                    'skipped': 'max_depth'
+                }
+                continue
 
+            sym = get_symbol_at_addr(addr)
 
-class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
-    """Exit breakpoint to disable logging when CheckDirectoryForName returns."""
+            if '@plt' in sym:
+                visited[addr] = {
+                    'symbol': sym,
+                    'insn_count': 0,
+                    'callees': [],
+                    'depth': depth,
+                    'skipped': 'plt'
+                }
+                continue
 
-    def __init__(self):
-        super().__init__(internal=True)
+            disasm = get_full_function_disasm(addr)
+            if not disasm:
+                visited[addr] = {
+                    'symbol': sym,
+                    'insn_count': 0,
+                    'callees': [],
+                    'depth': depth,
+                    'skipped': 'no_disasm'
+                }
+                continue
 
-    def stop(self):
-        ret = gdb.parse_and_eval(get_return_register())
-        final_errno = get_errno()
-        print(f"\n<<< Exiting CheckDirectoryForName, return={int(ret)}, final errno={final_errno}")
-        print("Backtrace at exit:")
-        gdb.execute("backtrace 20")
-        print(f"Active breakpoints: {len(gdb.breakpoints())}")
-        for bp in gdb.breakpoints():
-            print(f"  BP {bp.number}: {bp.location} enabled={bp.enabled}")
-        State.enabled = False
-        return False
+            callees = find_call_targets(disasm)
 
-    def out_of_scope(self):
-        print("<<< CheckDirectoryForName went out of scope (longjmp/exception?)")
-        State.enabled = False
+            visited[addr] = {
+                'symbol': sym,
+                'insn_count': len(disasm),
+                'callees': callees,
+                'depth': depth,
+                'skipped': None
+            }
 
+            for callee in callees:
+                if callee not in visited:
+                    to_visit.append((callee, depth + 1))
 
-# Create breakpoints for all Files access points in Directory.cxx:
-FilesAccessBreakpoint("Directory.cxx:57", ".size() in GetNumberOfFiles")
-FilesAccessBreakpoint("Directory.cxx:62", ".size() in GetFile bounds check")
-FilesAccessBreakpoint("Directory.cxx:65", "operator[] in GetFile")
-FilesAccessBreakpoint("Directory.cxx:76", ".clear()")
-FilesAccessBreakpoint("Directory.cxx:133", ".push_back() [Windows]")
+        return visited
 
-class DirectoryLoadReturnValueBreakpoint(gdb.FinishBreakpoint):
-    """Track the actual return value of Directory::Load."""
+    def print_call_graph(graph, start_addr):
+        """Print the call graph in a readable format."""
+        total = len(graph)
+        plt_count = sum(1 for v in graph.values() if v.get('skipped') == 'plt')
+        analyzed = sum(1 for v in graph.values() if v.get('skipped') is None)
 
-    def __init__(self, frame):
-        super().__init__(frame, internal=True)
+        print(f"\nSummary: {total} total addresses, {analyzed} analyzed, {plt_count} PLT stubs")
 
-    def stop(self):
-        if not State.enabled:
-            return False
-        # Read return register and masked value
-        reg = get_return_register()
-        retval = int(gdb.parse_and_eval(reg))
-        low32 = retval & 0xFFFFFFFF  # Lower 32 bits
-        bool_val = retval & 0xFF  # Lowest byte (bool)
-        print(f"\n[LOAD] Directory::Load returning: {reg}={hex(retval)}, low32={hex(low32)}, bool={bool_val}")
-        print(f"Final state: last_known_ptr={hex(State.last_known_ptr) if State.last_known_ptr else 'None'}, iterations={State.iteration}")
-        # Disassemble the return site to see caller's check
-        print("Caller disassembly (next 10 instructions):")
-        gdb.execute("x/10i $pc")
-        return False
+        max_depth = max(v['depth'] for v in graph.values())
 
+        for depth in range(max_depth + 1):
+            funcs_at_depth = [(a, v) for a, v in graph.items() if v['depth'] == depth]
+            if not funcs_at_depth:
+                continue
 
-class DirectoryLoadEntryBreakpoint(gdb.Breakpoint):
-    """Track entry to Directory::Load to set up return value tracking."""
+            print(f"\n--- Depth {depth} ({len(funcs_at_depth)} functions) ---")
 
-    def __init__(self):
-        super().__init__("Directory.cxx:220", gdb.BP_BREAKPOINT)
+            for addr, info in sorted(funcs_at_depth, key=lambda x: x[0]):
+                sym = info['symbol'] or f"<{hex(addr)}>"
 
-    def stop(self):
-        if not State.enabled:
-            return False
-        print(f"\n[LOAD] Entering Directory::Load")
-        DirectoryLoadReturnValueBreakpoint(gdb.selected_frame())
-        return False
+                if info.get('skipped'):
+                    print(f"  {hex(addr)}: {sym} [{info['skipped']}]")
+                else:
+                    print(f"  {hex(addr)}: {sym}")
+                    print(f"      {info['insn_count']} insns, {len(info['callees'])} calls")
 
-
-# Detailed Directory::Load logging
-DirectoryLoadEntryBreakpoint()
-DirectoryLoadBreakpoint()
-
-# Load return value tracking
-DirectoryLoadReturnBreakpoint()
-DirectoryLoadFailedBreakpoint()
-InsideIfBlockBreakpoint()
-
-# File search loop tracking
-FileLoopBreakpoint()
-RegexMatchBreakpoint()
-FileExistsBreakpoint()
-BestPathUpdateBreakpoint()
-
-# Trigger breakpoint
-CheckDirectoryEntryBreakpoint()
-
-# Continue only if attached to a target
-try:
-    gdb.execute("continue")
-except gdb.error as e:
-    print(f"Note: {e} (will continue when target is attached)")
+    def find_errno_access(graph):
+        """Find any functions in the graph that access errno."""
+        errno_funcs = []
+        for addr, info in graph.items():
+            if info.get('skipped'):
+                continue
+            disasm = get_full_function_disasm(addr)
+            for insn_addr, insn in disasm:
+                if '__errno_location' in insn:
+                    errno_funcs.append((addr, info['symbol'], insn_addr, insn))
+                    break
+        return errno_funcs
