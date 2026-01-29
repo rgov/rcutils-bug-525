@@ -2,6 +2,20 @@ import gdb
 import re
 import time
 
+
+def get_return_register():
+    """Get the return value register name for the current architecture."""
+    arch = gdb.selected_frame().architecture().name()
+    if "aarch64" in arch or "arm" in arch:
+        return "$x0"
+    elif "x86-64" in arch or "i386:x86-64" in arch:
+        return "$rax"
+    elif "i386" in arch or "i686" in arch:
+        return "$eax"
+    else:
+        # Default to trying x0, will error if wrong
+        return "$x0"
+
 def hexdump(data, base_addr, bytes_per_line=16):
     """Format bytes as hex dump with address and ASCII."""
     lines = []
@@ -291,7 +305,7 @@ class CheckDirectoryExitBreakpoint(gdb.FinishBreakpoint):
         super().__init__(internal=True)
 
     def stop(self):
-        ret = gdb.parse_and_eval("$x0")  # Return value on aarch64
+        ret = gdb.parse_and_eval(get_return_register())
         final_errno = get_errno()
         print(f"\n<<< Exiting CheckDirectoryForName, return={int(ret)}, final errno={final_errno}")
         print("Backtrace at exit:")
@@ -323,11 +337,12 @@ class DirectoryLoadReturnValueBreakpoint(gdb.FinishBreakpoint):
     def stop(self):
         if not State.enabled:
             return False
-        # Read both full register and masked value
-        x0 = int(gdb.parse_and_eval("$x0"))
-        w0 = x0 & 0xFFFFFFFF  # Lower 32 bits
-        bool_val = x0 & 0xFF  # Lowest byte (bool)
-        print(f"\n[LOAD] Directory::Load returning: x0={hex(x0)}, w0={hex(w0)}, bool={bool_val}")
+        # Read return register and masked value
+        reg = get_return_register()
+        retval = int(gdb.parse_and_eval(reg))
+        low32 = retval & 0xFFFFFFFF  # Lower 32 bits
+        bool_val = retval & 0xFF  # Lowest byte (bool)
+        print(f"\n[LOAD] Directory::Load returning: {reg}={hex(retval)}, low32={hex(low32)}, bool={bool_val}")
         print(f"Final state: last_known_ptr={hex(State.last_known_ptr) if State.last_known_ptr else 'None'}, iterations={State.iteration}")
         # Disassemble the return site to see caller's check
         print("Caller disassembly (next 10 instructions):")
