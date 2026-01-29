@@ -50,12 +50,7 @@ class State:
     last_known_ptr = None
     loop_iteration = 0
     last_errno = 0
-    # For single-step errno tracking
-    stepping = False
-    start_line = 0
-    current_errno = 0
-    step_count = 0
-    iter_start = 0
+    pending_step = False  # Flag for stop event handler
 
 
 class FilesAccessBreakpoint(gdb.Breakpoint):
@@ -84,47 +79,49 @@ class FilesAccessBreakpoint(gdb.Breakpoint):
         return False
 
 
-def stop_handler(event):
-    """Handle stop events for single-step errno tracking."""
-    if not State.stepping:
-        return
+def step_through_iteration():
+    """Single-step through one loop iteration, watching for errno changes."""
+    start_time = time.time()
+    step_count = 0
+    current_errno = get_errno()
+    start_line = 236
+    max_steps = 10000  # Safety limit
 
-    State.step_count += 1
-    new_errno = get_errno()
+    while step_count < max_steps:
+        gdb.execute("stepi", to_string=True)
+        step_count += 1
 
-    if new_errno != State.current_errno:
-        pc = int(gdb.parse_and_eval("$pc"))
-        print(f"\n[ERRNO] {State.current_errno} -> {new_errno} step {State.step_count} PC={hex(pc)}")
-        gdb.execute("x/1i $pc")
-        gdb.execute("bt 5")
-        State.current_errno = new_errno
+        new_errno = get_errno()
+        if new_errno != current_errno:
+            pc = int(gdb.parse_and_eval("$pc"))
+            print(f"\n[ERRNO] {current_errno} -> {new_errno} step {step_count} PC={hex(pc)}")
+            gdb.execute("x/1i $pc")
+            gdb.execute("bt 5")
+            current_errno = new_errno
 
-    # Stop when back in original function at next line
-    try:
-        frame = gdb.selected_frame()
-        sal = frame.find_sal()
-        if sal.line and sal.line != State.start_line:
-            # Check we're in the right function (Directory::Load)
-            frame_name = str(frame.name()) if frame.name() else ""
-            if "Directory" in frame_name or "Load" in frame_name:
-                elapsed = time.time() - State.iter_start
-                print(f"=== Done iter {State.iteration}: {State.step_count} steps in {elapsed:.2f}s ===")
-                State.stepping = False
-                State.last_errno = State.current_errno
-                gdb.post_event(lambda: gdb.execute("continue"))
-                return
-    except Exception as e:
-        print(f"[STOP HANDLER] Frame check error: {e}")
+        # Check if we're back in Directory::Load at a different line
+        try:
+            frame = gdb.selected_frame()
+            depth = 0
+            while frame is not None and depth < 20:
+                frame_name = str(frame.name()) if frame.name() else ""
+                if "Directory" in frame_name and "Load" in frame_name:
+                    sal = frame.find_sal()
+                    if sal.line and sal.line != start_line:
+                        elapsed = time.time() - start_time
+                        print(f"=== Done iter {State.iteration}: {step_count} steps in {elapsed:.2f}s ===")
+                        return
+                    break
+                frame = frame.older()
+                depth += 1
+        except Exception as e:
+            print(f"[STEP] Frame check error: {e}")
 
-    gdb.execute("stepi", to_string=True)
-
-
-# Connect stop handler to gdb stop events
-gdb.events.stop.connect(stop_handler)
+    print(f"[STEP] Hit max steps ({max_steps})")
 
 
 class DirectoryLoadBreakpoint(gdb.Breakpoint):
-    """Breakpoint on Directory::Load loop - single-steps each iteration watching errno."""
+    """Breakpoint on Directory::Load loop - triggers step_through_iteration via stop event."""
 
     def __init__(self):
         super().__init__("Directory.cxx:236", gdb.BP_BREAKPOINT)
@@ -134,15 +131,27 @@ class DirectoryLoadBreakpoint(gdb.Breakpoint):
             return False
 
         State.iteration += 1
-        State.stepping = True
-        State.start_line = 236
-        State.current_errno = get_errno()
-        State.step_count = 0
-        State.iter_start = time.time()
-        print(f"=== Iter {State.iteration}, errno={State.current_errno} ===")
+        State.pending_step = True  # Flag for stop event handler
+        print(f"=== Iter {State.iteration}, errno={get_errno()} ===")
 
-        # Return True to stop - stop_handler takes over on next stepi
+        # Return True to stop - stop event handler will do the stepping
         return True
+
+
+def stop_event_handler(event):
+    """Called after GDB fully stops - can safely execute commands."""
+    if not State.pending_step:
+        return
+
+    State.pending_step = False
+    try:
+        step_through_iteration()
+    except Exception as e:
+        print(f"[STEP ERROR] {e}")
+    gdb.execute("continue")
+
+
+gdb.events.stop.connect(stop_event_handler)
 
 
 class DirectoryLoadReturnBreakpoint(gdb.Breakpoint):
