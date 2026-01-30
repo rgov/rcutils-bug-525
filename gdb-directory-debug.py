@@ -69,7 +69,8 @@ class FindLibraryNameBreakpoint(gdb.Breakpoint):
 
     def stop(self):
         # Let this throw if 'name' or 'Raw' isn't in scope/valid
-        name_str = gdb.parse_and_eval("name.Raw.c_str()").string()
+        #name_str = gdb.parse_and_eval("name.Raw.c_str()").string()
+        name_str = gdb.parse_and_eval("name.Raw._M_dataplus._M_p").string()
         
         if "rcutils" in name_str:
             print(f"\n[TARGET DETECTED] Processing: {name_str}")
