@@ -140,7 +140,7 @@ jobs:
         if: always()
         run: |
           mkdir -p ${{ github.workspace }}/artifacts
-          dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
+          #dd if=/dev/urandom of=${{ github.workspace }}/artifacts/fake_urandom bs=1024 count=1024
           mkdir -p /tmp/sysroot
 
           # Extract cmake binary, shared libs, and debug symbols for GDB.
@@ -162,7 +162,7 @@ jobs:
           # Start container in background with QEMU waiting for GDB connection
           docker run -d --name cmake-build \
             -v ${{ github.workspace }}/artifacts:/app/artifacts \
-            -v ${{ github.workspace }}/artifacts/fake_urandom:/dev/urandom:ro \
+            -v ${{ github.workspace }}/fake_urandom:/dev/urandom:ro \
             -p 1234:1234 \
             --privileged \
             testcontainer bash -c '
