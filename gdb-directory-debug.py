@@ -108,6 +108,39 @@ def get_sbrk(ctx):
 # Malloc state introspection helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_symbol(base_name):
+    """Try multiple qualifications to find a glibc static symbol.
+    Returns the qualified name that works, or None."""
+    # Static symbols in malloc.c need file-qualified lookup when
+    # the compilation unit name varies across glibc builds.
+    candidates = [
+        base_name,
+        f"'malloc.c'::{base_name}",
+        f"'malloc/malloc.c'::{base_name}",
+    ]
+    for candidate in candidates:
+        try:
+            gdb.parse_and_eval(candidate)
+            return candidate
+        except gdb.error:
+            continue
+    return None
+
+
+# Cache resolved symbol names so we only search once
+_symbol_cache = {}
+
+
+def _get_symbol(base_name):
+    """Resolve and cache a glibc static symbol name."""
+    if base_name not in _symbol_cache:
+        resolved = _resolve_symbol(base_name)
+        _symbol_cache[base_name] = resolved
+        if resolved and resolved != base_name:
+            print(f"  [MALLOC] note: '{base_name}' resolved via '{resolved}'")
+    return _symbol_cache[base_name]
+
+
 def dump_malloc_params():
     """Dump all fields of glibc's mp_ (malloc_par) struct."""
     fields = [
@@ -127,10 +160,14 @@ def dump_malloc_params():
         ("hp_pagesize",     "unsigned long"),
         ("hp_flags",        "int"),
     ]
+    sym = _get_symbol("mp_")
     print("  [MALLOC] === mp_ (malloc parameters) ===")
+    if sym is None:
+        print("    (mp_ symbol not found — install libc6-dbgsym for glibc statics)")
+        return
     for name, cast in fields:
         try:
-            val = int(gdb.parse_and_eval(f"({cast})mp_.{name}"))
+            val = int(gdb.parse_and_eval(f"({cast}){sym}.{name}"))
             if "long" in cast:
                 print(f"    {name:24s} = {val} (0x{val:x})")
             else:
@@ -141,23 +178,27 @@ def dump_malloc_params():
 
 def dump_arena_state():
     """Dump main_arena fields showing heap fragmentation state."""
+    sym = _get_symbol("main_arena")
     print("  [MALLOC] === main_arena ===")
+    if sym is None:
+        print("    (main_arena symbol not found — install libc6-dbgsym)")
+        return
     fields = [
         ("system_mem",     "unsigned long"),
         ("max_system_mem", "unsigned long"),
     ]
     for name, cast in fields:
         try:
-            val = int(gdb.parse_and_eval(f"({cast})main_arena.{name}"))
+            val = int(gdb.parse_and_eval(f"({cast}){sym}.{name}"))
             print(f"    {name:24s} = {val} (0x{val:x})")
         except gdb.error:
             print(f"    {name:24s} = <unavailable>")
 
     # Top chunk: address and size
     try:
-        top_addr = int(gdb.parse_and_eval("(unsigned long)main_arena.top"))
+        top_addr = int(gdb.parse_and_eval(f"(unsigned long){sym}.top"))
         top_size = int(gdb.parse_and_eval(
-            "((unsigned long)main_arena.top->mchunk_size) & ~7"))
+            f"((unsigned long){sym}.top->mchunk_size) & ~7"))
         print(f"    {'top_chunk_addr':24s} = 0x{top_addr:x}")
         print(f"    {'top_chunk_size':24s} = {top_size} (0x{top_size:x})")
     except gdb.error as e:
@@ -165,7 +206,7 @@ def dump_arena_state():
 
     # Flags (contiguous bit)
     try:
-        flags = int(gdb.parse_and_eval("main_arena.flags"))
+        flags = int(gdb.parse_and_eval(f"{sym}.flags"))
         contiguous = "yes" if (flags & 2) == 0 else "no"
         print(f"    {'flags':24s} = 0x{flags:x} (contiguous={contiguous})")
     except gdb.error:
@@ -204,42 +245,16 @@ def dump_malloc_info(ctx=None):
         _reenable_bps(disabled)
 
 
-def dump_mallinfo2(ctx=None):
-    """Call mallinfo2() and print the returned struct."""
-    print("  [MALLOC] === mallinfo2 ===")
-    fields = [
-        "arena",      # non-mmapped space from system
-        "ordblks",    # number of free chunks
-        "smblks",     # number of fastbin blocks
-        "hblks",      # number of mmapped regions
-        "hblkhd",     # space in mmapped regions
-        "fsmblks",    # space in freed fastbin blocks
-        "uordblks",   # total allocated space
-        "fordblks",   # total free space
-        "keepcost",   # top-most releasable space
-    ]
+def dump_malloc_stats(ctx=None):
+    """Call malloc_stats() which prints a summary to the inferior's stderr.
+    This is more robust than mallinfo2/mallinfo since it has a void return
+    type and doesn't require GDB to know any struct definitions."""
     disabled = _disable_inner_bps(ctx)
     try:
-        gdb.execute("set $mi = (struct mallinfo2)mallinfo2()")
-        for f in fields:
-            try:
-                val = int(gdb.parse_and_eval(f"$mi.{f}"))
-                print(f"    {f:16s} = {val:>12d} (0x{val:x})")
-            except gdb.error:
-                print(f"    {f:16s} = <unavailable>")
+        gdb.execute("call (void)malloc_stats()")
+        print("  [MALLOC] malloc_stats() output sent to container stderr")
     except gdb.error as e:
-        # mallinfo2 may not exist in glibc 2.35; try mallinfo
-        print(f"    mallinfo2 failed ({e}), trying mallinfo...")
-        try:
-            gdb.execute("set $mi = (struct mallinfo)mallinfo()")
-            for f in fields:
-                try:
-                    val = int(gdb.parse_and_eval(f"$mi.{f}"))
-                    print(f"    {f:16s} = {val:>12d} (0x{val:x})")
-                except gdb.error:
-                    pass
-        except gdb.error as e2:
-            print(f"    mallinfo also failed: {e2}")
+        print(f"  [MALLOC] malloc_stats() failed: {e}")
     finally:
         _reenable_bps(disabled)
 
@@ -312,21 +327,47 @@ def dump_proc_status():
 _malloc_state_first_call = True
 
 
+def dump_libc_debug_info():
+    """Check whether GDB has loaded debug symbols for libc."""
+    print("  [MALLOC] === libc debug symbol check ===")
+    try:
+        output = gdb.execute("info sharedlibrary libc", to_string=True)
+        for line in output.strip().splitlines():
+            print(f"    {line}")
+    except gdb.error:
+        print("    (info sharedlibrary failed)")
+    # Also check if mp_ is findable at all
+    sym = _get_symbol("mp_")
+    if sym:
+        print(f"    mp_ found as: {sym}")
+    else:
+        print("    mp_ NOT found (libc debug symbols missing?)")
+        # Show what GDB finds for 'info variables mp_'
+        try:
+            output = gdb.execute("info variables ^mp_$", to_string=True)
+            for line in output.strip().splitlines()[:5]:
+                print(f"      {line}")
+        except gdb.error:
+            pass
+
+
 def dump_malloc_state(label, ctx=None):
-    """Dump comprehensive malloc state (mp_, arena, mallinfo, malloc_info).
+    """Dump comprehensive malloc state (mp_, arena, malloc_stats, malloc_info).
     Pass ctx (LoadContext) when inner breakpoints are active so they get
     temporarily disabled during inferior function calls.
-    Static context (version, env, limits) is only dumped on the first call."""
+    Static context (version, env, limits, debug check) is only dumped on
+    the first call."""
     global _malloc_state_first_call
     print(f"  [MALLOC] === malloc state dump: {label} ===")
     if _malloc_state_first_call:
+        dump_libc_debug_info()
         dump_glibc_version(ctx)
         dump_env_and_limits(ctx)
         _malloc_state_first_call = False
     dump_proc_status()
     dump_malloc_params()
     dump_arena_state()
-    dump_mallinfo2(ctx)
+    dump_malloc_stats(ctx)
     dump_malloc_info(ctx)
     print(f"  [MALLOC] === end malloc state dump ===")
 
