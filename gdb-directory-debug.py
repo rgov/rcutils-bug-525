@@ -233,31 +233,6 @@ def _reenable_bps(disabled):
             bp.enabled = True
 
 
-def dump_malloc_info(ctx=None):
-    """Call malloc_info(0, stderr) in the inferior for full XML dump."""
-    disabled = _disable_inner_bps(ctx)
-    try:
-        gdb.execute("call (int)malloc_info(0, stderr)")
-        print("  [MALLOC] malloc_info() output sent to container stderr")
-    except gdb.error as e:
-        print(f"  [MALLOC] malloc_info() failed: {e}")
-    finally:
-        _reenable_bps(disabled)
-
-
-def dump_malloc_stats(ctx=None):
-    """Call malloc_stats() which prints a summary to the inferior's stderr.
-    This is more robust than mallinfo2/mallinfo since it has a void return
-    type and doesn't require GDB to know any struct definitions."""
-    disabled = _disable_inner_bps(ctx)
-    try:
-        gdb.execute("call (void)malloc_stats()")
-        print("  [MALLOC] malloc_stats() output sent to container stderr")
-    except gdb.error as e:
-        print(f"  [MALLOC] malloc_stats() failed: {e}")
-    finally:
-        _reenable_bps(disabled)
-
 
 def dump_glibc_version(ctx=None):
     """Print the glibc version string from the inferior."""
@@ -352,10 +327,10 @@ def dump_libc_debug_info():
 
 
 def dump_malloc_state(label, ctx=None):
-    """Dump comprehensive malloc state (mp_, arena, malloc_stats, malloc_info).
-    Pass ctx (LoadContext) when inner breakpoints are active so they get
-    temporarily disabled during inferior function calls.
-    Static context (version, env, limits, debug check) is only dumped on
+    """Dump comprehensive malloc state (mp_, arena) via direct symbol reads.
+    Inferior function calls (malloc_stats, malloc_info) are NOT used here
+    because they hang under QEMU's gdbstub (syscalls in inferior calls
+    deadlock).  Static context (version, env, limits) is only dumped on
     the first call."""
     global _malloc_state_first_call
     print(f"  [MALLOC] === malloc state dump: {label} ===")
@@ -367,8 +342,6 @@ def dump_malloc_state(label, ctx=None):
     dump_proc_status()
     dump_malloc_params()
     dump_arena_state()
-    dump_malloc_stats(ctx)
-    dump_malloc_info(ctx)
     print(f"  [MALLOC] === end malloc state dump ===")
 
 
